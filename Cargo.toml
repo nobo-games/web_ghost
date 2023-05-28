@@ -9,6 +9,7 @@ edition = "2021"
 bevy = "0.10"
 bevy_ggrs = { version = "0.12", features = ["wasm-bindgen"] }
 bevy_matchbox = { version = "0.6", features = ["ggrs"] }
+bevy_asset_loader = "0.15"
 
 # Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
 [profile.dev.package."*"]
