@@ -1,0 +1,19 @@
+[package]
+name = "extreme_bevy"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bevy = "0.10"
+bevy_ggrs = { version = "0.12", features = ["wasm-bindgen"] }
+bevy_matchbox = { version = "0.6", features = ["ggrs"] }
+
+# Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
+[profile.dev.package."*"]
+opt-level = 3
+
+# Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes
+[profile.release]
+codegen-units = 1
