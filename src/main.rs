@@ -1,5 +1,6 @@
-use bevy::{math::Vec3Swizzles, prelude::*, render::camera::ScalingMode};
+use bevy::{math::Vec3Swizzles, prelude::*, render::camera::ScalingMode, utils::HashMap};
 use bevy_asset_loader::prelude::*;
+use bevy_egui::{egui::SidePanel, EguiContexts, EguiPlugin};
 use bevy_ggrs::{
     ggrs::{self, PlayerType},
     GGRSPlugin, GGRSSchedule, PlayerInputs, Rollback, RollbackIdProvider,
@@ -7,6 +8,7 @@ use bevy_ggrs::{
 use bevy_matchbox::prelude::*;
 use components::*;
 use input::*;
+use serde::{Deserialize, Serialize};
 
 mod components;
 mod input;
@@ -35,10 +37,11 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugin(EguiPlugin)
         .insert_resource(ClearColor(Color::rgb(0.53, 0.53, 0.53)))
         .add_systems((setup, start_matchbox_socket).in_schedule(OnEnter(GameState::Matchmaking)))
         .add_systems((
-            wait_for_players.run_if(in_state(GameState::Matchmaking)),
+            lobby.run_if(in_state(GameState::Matchmaking)),
             spawn_players.in_schedule(OnEnter(GameState::InGame)),
             camera_follow.run_if(in_state(GameState::InGame)),
         ))
@@ -98,40 +101,31 @@ fn setup(mut commands: Commands) {
     }
 }
 
-fn spawn_players(mut commands: Commands, mut rip: ResMut<RollbackIdProvider>) {
-    // Player 1
-    commands.spawn((
-        Player { handle: 0 },
-        Rollback::new(rip.next_id()),
-        SpriteBundle {
-            transform: Transform::from_translation(Vec3::new(-2., 0., 100.)), // <-- new
-            sprite: Sprite {
-                color: Color::rgb(0., 0.47, 1.),
-                custom_size: Some(Vec2::new(1., 1.)),
+fn spawn_players(
+    mut commands: Commands,
+    mut rip: ResMut<RollbackIdProvider>,
+    players: Query<(Entity, &Player)>,
+) {
+    for (entity, player) in players.iter() {
+        commands.entity(entity).insert((
+            Rollback::new(rip.next_id()),
+            SpriteBundle {
+                transform: Transform::from_translation(Vec3::new(
+                    -8. + 2. * player.handle as f32,
+                    0.,
+                    100.,
+                )),
+                sprite: Sprite {
+                    color: Color::rgb(0., 0.47, 1.),
+                    custom_size: Some(Vec2::new(1., 1.)),
+                    ..default()
+                },
                 ..default()
             },
-            ..default()
-        },
-        BulletReady(true),
-        MoveDir(-Vec2::X),
-    ));
-
-    // Player 2
-    commands.spawn((
-        Player { handle: 1 },
-        Rollback::new(rip.next_id()),
-        SpriteBundle {
-            transform: Transform::from_translation(Vec3::new(2., 0., 100.)), // <-- new
-            sprite: Sprite {
-                color: Color::rgb(0., 0.4, 0.),
-                custom_size: Some(Vec2::new(1., 1.)),
-                ..default()
-            },
-            ..default()
-        },
-        BulletReady(true),
-        MoveDir(Vec2::X),
-    ));
+            BulletReady(true),
+            MoveDir(-Vec2::X),
+        ));
+    }
 }
 
 fn move_players(
@@ -145,7 +139,6 @@ fn move_players(
         if direction == Vec2::ZERO {
             continue;
         }
-
         move_dir.0 = direction;
 
         let move_speed = 0.13;
@@ -160,56 +153,188 @@ fn move_players(
     }
 }
 
+#[derive(Serialize, Deserialize)]
+enum P2PMessage {
+    PeerInfo(PeerInfo),
+}
+
 fn start_matchbox_socket(mut commands: Commands) {
-    let room_url = "ws://127.0.0.1:3536/extreme_bevy?next=2";
+    let room_url = "ws://127.0.0.1:3536/extreme_bevy";
     info!("connecting to matchbox server: {:?}", room_url);
     commands.insert_resource(MatchboxSocket::new_ggrs(room_url));
 }
 
-fn wait_for_players(
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug, Component)]
+struct PeerInfo {
+    ready: bool,
+    name: String,
+}
+
+#[derive(Component)]
+pub struct IsLocal(bool);
+#[derive(Component)]
+pub struct MatchBoxId(PeerId);
+
+#[derive(Resource, Default)]
+struct HandleMapping(HashMap<PeerId, usize>);
+
+fn lobby(
     mut commands: Commands,
     mut socket: ResMut<MatchboxSocket<SingleChannel>>,
     mut next_state: ResMut<NextState<GameState>>,
+    mut contexts: EguiContexts,
+    mut players: Query<(Entity, &MatchBoxId, &IsLocal, &mut PeerInfo)>,
 ) {
-    if socket.get_channel(0).is_err() {
-        return; // we've already started
-    }
-
-    // Check for new connections
-    socket.update_peers();
-    let players = socket.players();
-
-    let num_players = 2;
-    if players.len() < num_players {
-        return; // wait for more players
-    }
-
-    info!("All peers have joined, going in-game");
-
-    // create a GGRS P2P session
-    let mut session_builder = ggrs::SessionBuilder::<GgrsConfig>::new()
-        .with_num_players(num_players)
-        .with_input_delay(0);
-
-    for (i, player) in players.into_iter().enumerate() {
-        if player == PlayerType::Local {
-            commands.insert_resource(LocalPlayerHandle(i));
+    SidePanel::left("left_panel").show(contexts.ctx_mut(), |ui| {
+        if socket.get_channel(0).is_err() {
+            return; // we've already started
         }
-        session_builder = session_builder
-            .add_player(player, i)
-            .expect("failed to add player");
-    }
 
-    // move the channel out of the socket (required because GGRS takes ownership of it)
-    let channel = socket.take_channel(0).unwrap();
+        let connected_peers_ids = socket.connected_peers().collect::<Vec<_>>();
+        if let Some(id) = socket.id() {
+            if players.is_empty() {
+                let my_info = PeerInfo {
+                    ready: false,
+                    name: "Peer A".to_string(),
+                };
+                for peer_id in &connected_peers_ids {
+                    socket.send(
+                        bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
+                            .unwrap()
+                            .into_boxed_slice(),
+                        *peer_id,
+                    );
+                }
+                commands.spawn((MatchBoxId(id), IsLocal(true), my_info));
+                return;
+            }
+        } else {
+            return;
+        }
 
-    // start the GGRS session
-    let ggrs_session = session_builder
-        .start_p2p_session(channel)
-        .expect("failed to start session");
+        let local_player_entity = players.iter().filter(|p| p.2 .0).next().unwrap().0;
 
-    commands.insert_resource(bevy_ggrs::Session::P2PSession(ggrs_session));
-    next_state.set(GameState::InGame);
+        // Check for new connections
+        for (peer, state) in socket.update_peers() {
+            match state {
+                PeerState::Connected => {
+                    info!("Peer joined: {:?}", peer);
+                    let my_info = players
+                        .get_component::<PeerInfo>(local_player_entity)
+                        .unwrap()
+                        .clone();
+
+                    socket.send(
+                        bincode::serialize(&P2PMessage::PeerInfo(my_info))
+                            .unwrap()
+                            .into_boxed_slice(),
+                        peer,
+                    );
+                }
+                PeerState::Disconnected => {
+                    info!("Peer left: {peer:?}");
+                }
+            }
+        }
+
+        for (entity, id, local, ..) in players.iter() {
+            if !(local.0 || connected_peers_ids.contains(&id.0)) {
+                commands.entity(entity).despawn();
+            }
+        }
+
+        for (peer_id, packet) in socket.receive() {
+            if let Ok(p2p_message) = bincode::deserialize::<P2PMessage>(&packet) {
+                match p2p_message {
+                    P2PMessage::PeerInfo(info) => {
+                        let entity = players
+                            .iter()
+                            .filter(|(_, id, ..)| id.0 == peer_id)
+                            .map(|(entity, ..)| entity)
+                            .next();
+                        if let Some(entity) = entity {
+                            commands.entity(entity).insert(info);
+                        } else {
+                            commands.spawn((MatchBoxId(peer_id), IsLocal(false), info));
+                        }
+                    }
+                }
+            }
+        }
+
+        {
+            let mut my_info = players
+                .get_component_mut::<PeerInfo>(local_player_entity)
+                .unwrap();
+            let info_before = my_info.clone();
+            ui.checkbox(&mut my_info.ready, "I'm ready");
+            ui.horizontal(|ui| {
+                ui.label("Name: ");
+                ui.text_edit_singleline(&mut my_info.name);
+            });
+            if *my_info != info_before {
+                for peer_id in connected_peers_ids {
+                    socket.send(
+                        bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
+                            .unwrap()
+                            .into_boxed_slice(),
+                        peer_id,
+                    );
+                }
+            }
+        }
+
+        ui.group(|ui| {
+            ui.heading("Players");
+            ui.separator();
+            for (index, (.., peer_info)) in players.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(if peer_info.ready { "☑" } else { "☐" });
+                    ui.label(format!("{index}: {}", peer_info.name));
+                });
+            }
+        });
+
+        if !players.iter().all(|(.., info)| info.ready) {
+            return;
+        }
+
+        info!("All peers are ready, starting game");
+
+        // create a GGRS P2P session
+        let mut session_builder = ggrs::SessionBuilder::<GgrsConfig>::new()
+            .with_num_players(players.iter().len())
+            .with_input_delay(0);
+
+        for (i, player) in socket.players().into_iter().enumerate() {
+            let (entity, ..) = players
+                .iter()
+                .find(|(_, id, local, ..)| match player {
+                    PlayerType::Local => local.0,
+                    PlayerType::Remote(remote_id) => remote_id == id.0,
+                    PlayerType::Spectator(spectator_id) => spectator_id == id.0,
+                })
+                .unwrap();
+            if let PlayerType::Local = player {
+                commands.insert_resource(LocalPlayerHandle(i));
+            }
+            session_builder = session_builder
+                .add_player(player, i)
+                .expect("failed to add player");
+            commands.entity(entity).insert(Player { handle: i });
+        }
+
+        // move the channel out of the socket (required because GGRS takes ownership of it)
+        let channel = socket.take_channel(0).unwrap();
+
+        // start the GGRS session
+        let ggrs_session = session_builder
+            .start_p2p_session(channel)
+            .expect("failed to start session");
+
+        commands.insert_resource(bevy_ggrs::Session::P2PSession(ggrs_session));
+        next_state.set(GameState::InGame);
+    });
 }
 
 struct GgrsConfig;
@@ -289,7 +414,7 @@ fn fire_bullets(
                 },
                 Rollback::new(rip.next_id()),
             ));
-            bullet_ready.0 = false; // <-- new
+            bullet_ready.0 = false;
         }
     }
 }
