@@ -159,7 +159,7 @@ enum P2PMessage {
 }
 
 fn start_matchbox_socket(mut commands: Commands) {
-    let room_url = "ws://127.0.0.1:3536/extreme_bevy";
+    let room_url = "ws://127.0.0.1:3536/web_ghost";
     info!("connecting to matchbox server: {:?}", room_url);
     commands.insert_resource(MatchboxSocket::new_ggrs(room_url));
 }
