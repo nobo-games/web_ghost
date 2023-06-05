@@ -63,8 +63,6 @@ fn main() {
 }
 
 fn kill_game_on_disconnect(world: &mut World) {
-    info!("running info system");
-
     let bevy_ggrs::Session::P2PSession(session) = &mut *world
         .get_resource_mut::<bevy_ggrs::Session<GgrsConfig>>()
         .unwrap()
