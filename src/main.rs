@@ -2,7 +2,8 @@ use bevy::{math::Vec3Swizzles, prelude::*, render::camera::ScalingMode, utils::H
 use bevy_asset_loader::prelude::*;
 use bevy_egui::{egui::SidePanel, EguiContexts, EguiPlugin};
 use bevy_ggrs::{
-    ggrs::{self, PlayerType},
+    ggrs::{self, GGRSEvent, PlayerType},
+    ggrs_stage::GGRSStage,
     GGRSPlugin, GGRSSchedule, PlayerInputs, Rollback, RollbackIdProvider,
 };
 use bevy_matchbox::prelude::*;
@@ -39,11 +40,14 @@ fn main() {
         }))
         .add_plugin(EguiPlugin)
         .insert_resource(ClearColor(Color::rgb(0.53, 0.53, 0.53)))
-        .add_systems((setup, start_matchbox_socket).in_schedule(OnEnter(GameState::Matchmaking)))
+        .add_system(setup.in_schedule(OnExit(GameState::AssetLoading)))
+        .add_system(start_matchbox_socket.in_schedule(OnEnter(GameState::Matchmaking)))
         .add_systems((
             lobby.run_if(in_state(GameState::Matchmaking)),
             spawn_players.in_schedule(OnEnter(GameState::InGame)),
             camera_follow.run_if(in_state(GameState::InGame)),
+            delete_session.in_schedule(OnExit(GameState::InGame)),
+            kill_game_on_disconnect.run_if(in_state(GameState::InGame)),
         ))
         .add_systems(
             (
@@ -56,6 +60,44 @@ fn main() {
                 .in_schedule(GGRSSchedule),
         )
         .run();
+}
+
+fn kill_game_on_disconnect(world: &mut World) {
+    info!("running info system");
+
+    let bevy_ggrs::Session::P2PSession(session) = &mut *world
+        .get_resource_mut::<bevy_ggrs::Session<GgrsConfig>>()
+        .unwrap()
+     else {
+        return
+     };
+
+    if !session.events().any(|e| {
+        if let GGRSEvent::Disconnected { .. } = e {
+            true
+        } else {
+            false
+        }
+    }) {
+        return;
+    }
+
+    info!("GGRS Disconnect event detected");
+    world
+        .get_resource_mut::<NextState<GameState>>()
+        .unwrap()
+        .set(GameState::Matchmaking);
+
+    for (local, mut info) in world.query::<(&IsLocal, &mut PeerInfo)>().iter_mut(world) {
+        if local.0 {
+            info.ready = false;
+            break;
+        }
+    }
+}
+
+fn delete_session(mut commands: Commands) {
+    commands.remove_resource::<bevy_ggrs::Session<GgrsConfig>>();
 }
 
 const MAP_SIZE: u32 = 41;
@@ -161,7 +203,13 @@ enum P2PMessage {
 fn start_matchbox_socket(mut commands: Commands) {
     let room_url = "ws://127.0.0.1:3536/web_ghost";
     info!("connecting to matchbox server: {:?}", room_url);
-    commands.insert_resource(MatchboxSocket::new_ggrs(room_url));
+    // commands.insert_resource(MatchboxSocket::new_ggrs(room_url));
+    commands.insert_resource(MatchboxSocket::from(
+        WebRtcSocketBuilder::new(room_url)
+            .add_channel(ChannelConfig::ggrs())
+            .add_reliable_channel()
+            .build(),
+    ));
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug, Component)]
@@ -180,7 +228,7 @@ struct HandleMapping(HashMap<PeerId, usize>);
 
 fn lobby(
     mut commands: Commands,
-    mut socket: ResMut<MatchboxSocket<SingleChannel>>,
+    mut socket: ResMut<MatchboxSocket<MultipleChannels>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut contexts: EguiContexts,
     mut players: Query<(Entity, &MatchBoxId, &IsLocal, &mut PeerInfo)>,
@@ -198,7 +246,7 @@ fn lobby(
                     name: "Peer A".to_string(),
                 };
                 for peer_id in &connected_peers_ids {
-                    socket.send(
+                    socket.channel(1).send(
                         bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
                             .unwrap()
                             .into_boxed_slice(),
@@ -224,7 +272,7 @@ fn lobby(
                         .unwrap()
                         .clone();
 
-                    socket.send(
+                    socket.channel(1).send(
                         bincode::serialize(&P2PMessage::PeerInfo(my_info))
                             .unwrap()
                             .into_boxed_slice(),
@@ -243,7 +291,7 @@ fn lobby(
             }
         }
 
-        for (peer_id, packet) in socket.receive() {
+        for (peer_id, packet) in socket.channel(1).receive() {
             if let Ok(p2p_message) = bincode::deserialize::<P2PMessage>(&packet) {
                 match p2p_message {
                     P2PMessage::PeerInfo(info) => {
@@ -274,7 +322,7 @@ fn lobby(
             });
             if *my_info != info_before {
                 for peer_id in connected_peers_ids {
-                    socket.send(
+                    socket.channel(1).send(
                         bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
                             .unwrap()
                             .into_boxed_slice(),
@@ -305,8 +353,32 @@ fn lobby(
         let mut session_builder = ggrs::SessionBuilder::<GgrsConfig>::new()
             .with_num_players(players.iter().len())
             .with_input_delay(0);
+        let socket_players = (|| {
+            let Some(our_id) = socket.id() else {
+                // we're still waiting for the server to initialize our id
+                // no peers should be added at this point anyway
+                return vec![PlayerType::Local];
+            };
 
-        for (i, player) in socket.players().into_iter().enumerate() {
+            // player order needs to be consistent order across all peers
+            let mut ids: Vec<_> = socket
+                .connected_peers()
+                .chain(std::iter::once(our_id))
+                .collect();
+            ids.sort();
+
+            ids.into_iter()
+                .map(|id| {
+                    if id == our_id {
+                        PlayerType::Local
+                    } else {
+                        PlayerType::Remote(id)
+                    }
+                })
+                .collect::<Vec<_>>()
+        })();
+
+        for (i, player) in socket_players.into_iter().enumerate() {
             let (entity, ..) = players
                 .iter()
                 .find(|(_, id, local, ..)| match player {
@@ -337,6 +409,7 @@ fn lobby(
     });
 }
 
+#[derive(Debug)]
 struct GgrsConfig;
 
 impl ggrs::Config for GgrsConfig {
