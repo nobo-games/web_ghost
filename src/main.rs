@@ -527,7 +527,7 @@ fn kill_players(
                 bullet_transform.translation.xy(),
             );
             if distance < PLAYER_RADIUS + BULLET_RADIUS {
-                commands.entity(player).despawn_recursive();
+                commands.entity(player).remove::<SpriteBundle>();
             }
         }
     }
