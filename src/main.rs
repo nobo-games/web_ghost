@@ -22,6 +22,11 @@ fn main() {
         .register_rollback_component::<Transform>()
         .register_rollback_component::<BulletReady>()
         .register_rollback_component::<MoveDir>()
+        .register_type_dependency::<f32>()
+        .register_type_dependency::<bool>()
+        .register_type_dependency::<Vec3>()
+        .register_type_dependency::<Vec2>()
+        .register_type_dependency::<Quat>()
         .build(&mut app);
 
     app.add_state::<GameState>()
@@ -44,6 +49,7 @@ fn main() {
         .add_system(start_matchbox_socket.in_schedule(OnEnter(GameState::Matchmaking)))
         .add_systems((
             lobby.run_if(in_state(GameState::Matchmaking)),
+            load_snapshot.in_schedule(OnEnter(GameState::InGame)),
             spawn_players.in_schedule(OnEnter(GameState::InGame)),
             camera_follow.run_if(in_state(GameState::InGame)),
             delete_session.in_schedule(OnExit(GameState::InGame)),
@@ -59,8 +65,12 @@ fn main() {
             )
                 .in_schedule(GGRSSchedule),
         )
+        .init_resource::<GameSave>()
         .run();
 }
+
+#[derive(Resource, Default)]
+struct GameSave(Option<String>);
 
 fn kill_game_on_disconnect(world: &mut World) {
     let bevy_ggrs::Session::P2PSession(session) = &mut *world
@@ -91,6 +101,22 @@ fn kill_game_on_disconnect(world: &mut World) {
             info.ready = false;
             break;
         }
+    }
+
+    let snapshot = world
+        .get_resource::<GGRSStage<GgrsConfig>>()
+        .unwrap()
+        .get_serialized_snapshot(world);
+    info!("Saving world snapshot: {snapshot}");
+    world.get_resource_mut::<GameSave>().unwrap().0 = Some(snapshot);
+}
+
+fn load_snapshot(world: &mut World) {
+    if let Some(snapshot) = &world.get_resource_mut::<GameSave>().unwrap().0.take() {
+        info!("Loading world snapshot: {snapshot}");
+        world.resource_scope(|world, stage: Mut<GGRSStage<GgrsConfig>>| {
+            stage.load_serialized_snapshot(world, snapshot);
+        });
     }
 }
 
@@ -145,26 +171,29 @@ fn spawn_players(
     mut commands: Commands,
     mut rip: ResMut<RollbackIdProvider>,
     players: Query<(Entity, &Player)>,
+    game_save: Res<GameSave>,
 ) {
-    for (entity, player) in players.iter() {
-        commands.entity(entity).insert((
-            Rollback::new(rip.next_id()),
-            SpriteBundle {
-                transform: Transform::from_translation(Vec3::new(
-                    -8. + 2. * player.handle as f32,
-                    0.,
-                    100.,
-                )),
-                sprite: Sprite {
-                    color: Color::rgb(0., 0.47, 1.),
-                    custom_size: Some(Vec2::new(1., 1.)),
+    if game_save.0.is_none() {
+        for (entity, player) in players.iter() {
+            commands.entity(entity).insert((
+                Rollback::new(rip.next_id()),
+                SpriteBundle {
+                    transform: Transform::from_translation(Vec3::new(
+                        -8. + 2. * player.handle as f32,
+                        0.,
+                        100.,
+                    )),
+                    sprite: Sprite {
+                        color: Color::rgb(0., 0.47, 1.),
+                        custom_size: Some(Vec2::new(1., 1.)),
+                        ..default()
+                    },
                     ..default()
                 },
-                ..default()
-            },
-            BulletReady(true),
-            MoveDir(-Vec2::X),
-        ));
+                BulletReady(true),
+                MoveDir(-Vec2::X),
+            ));
+        }
     }
 }
 
