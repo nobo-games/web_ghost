@@ -5273,7 +5273,6 @@ dependencies = [
  "bincode",
  "indexmap",
  "serde",
- "web-sys",
 ]
 
 [[package]]
