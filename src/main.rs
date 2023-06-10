@@ -5,7 +5,10 @@ use bevy::{
     utils::{HashMap, Uuid},
 };
 use bevy_asset_loader::prelude::*;
-use bevy_egui::{egui::SidePanel, EguiContexts, EguiPlugin};
+use bevy_egui::{
+    egui::{Align, Layout, SidePanel, TextEdit, TopBottomPanel},
+    EguiContexts, EguiPlugin,
+};
 use bevy_ggrs::{
     ggrs::{self, GGRSEvent, PlayerType},
     ggrs_stage::GGRSStage,
@@ -57,15 +60,17 @@ fn main() {
         .add_system(start_matchbox_socket.in_schedule(OnEnter(GameState::Matchmaking)))
         .add_systems((
             lobby.run_if(in_state(GameState::Matchmaking)),
-            load_snapshot.in_schedule(OnEnter(GameState::InGame)),
-            insert_rollback_components
+            bottom_bar_ui.run_if(in_state(GameState::InGame)),
+            insert_player_components.in_schedule(OnEnter(GameState::InGame)),
+            load_snapshot
                 .in_schedule(OnEnter(GameState::InGame))
-                .after(load_snapshot),
-            insert_non_rollback_components
+                .after(insert_player_components),
+            apply_loaded_components
                 .in_schedule(OnEnter(GameState::InGame))
+                .after(insert_player_components)
                 .after(load_snapshot),
             camera_follow.run_if(in_state(GameState::InGame)),
-            delete_session.in_schedule(OnExit(GameState::InGame)),
+            cleanup_session.in_schedule(OnExit(GameState::InGame)),
             kill_game_on_disconnect.run_if(in_state(GameState::InGame)),
         ))
         .add_systems(
@@ -135,8 +140,11 @@ fn load_snapshot(world: &mut World) {
     }
 }
 
-fn delete_session(mut commands: Commands) {
+fn cleanup_session(mut commands: Commands, rollback_entities: Query<Entity, With<Rollback>>) {
     commands.remove_resource::<bevy_ggrs::Session<GgrsConfig>>();
+    for entity in rollback_entities.iter() {
+        commands.entity(entity).despawn();
+    }
 }
 
 const MAP_SIZE: u32 = 41;
@@ -182,12 +190,13 @@ fn setup(mut commands: Commands) {
     }
 }
 
-fn insert_rollback_components(
+fn insert_player_components(
     mut commands: Commands,
     mut rip: ResMut<RollbackIdProvider>,
-    players: Query<(Entity, &Player), Without<Transform>>, // This won't find any if loaded from gamestate
+    players: Query<(Entity, &Player)>, // This won't find any if loaded from gamestate
 ) {
     for (entity, player) in players.iter() {
+        info!("Inserting player components, entity: {entity:?}");
         commands.entity(entity).insert((
             Rollback::new(rip.next_id()),
             SpriteBundle {
@@ -209,31 +218,39 @@ fn insert_rollback_components(
     }
 }
 
-fn insert_non_rollback_components(
+fn apply_loaded_components(
     mut commands: Commands,
-    mut rip: ResMut<RollbackIdProvider>,
-    players: Query<(Entity, &Player, &Transform), Without<Sprite>>, // Will find entities only if loaded from gamestate
+    new_players: Query<(Entity, &PersistentPeerId), With<Player>>,
+    loaded_players: Query<
+        (
+            Entity,
+            &PersistentPeerId,
+            &Transform,
+            &MoveDir,
+            &BulletReady,
+        ),
+        Without<Player>,
+    >,
 ) {
-    for (entity, player, original_tranform) in players.iter() {
-        commands
-            .entity(entity)
-            .insert((
-                Rollback::new(rip.next_id()),
-                SpriteBundle {
-                    transform: Transform::from_translation(Vec3::new(
-                        -8. + 2. * player.handle as f32,
-                        0.,
-                        100.,
-                    )),
-                    sprite: Sprite {
-                        color: Color::rgb(0., 0.47, 1.),
-                        custom_size: Some(Vec2::new(1., 1.)),
-                        ..default()
-                    },
-                    ..default()
-                },
-            ))
-            .insert(original_tranform.clone());
+    for (new_entity, new_id) in new_players.iter() {
+        info!("New player: {:?}", new_id.0);
+        for (_loaded_entity, loaded_id, loaded_transform, move_dir, bullet_ready) in
+            loaded_players.iter()
+        {
+            info!("laoded player: {:?}", loaded_id.0);
+            if new_id.0 == loaded_id.0 {
+                info!("Match: {} == {}", new_id.0, loaded_id.0);
+                commands.entity(new_entity).insert((
+                    loaded_transform.clone(),
+                    move_dir.clone(),
+                    BulletReady(bullet_ready.0),
+                ));
+                break;
+            }
+        }
+    }
+    for (entity, ..) in loaded_players.iter() {
+        commands.entity(entity).despawn();
     }
 }
 
@@ -260,6 +277,22 @@ fn move_players(
         transform.translation.x = new_pos.x;
         transform.translation.y = new_pos.y;
     }
+}
+
+fn bottom_bar_ui(mut contexts: EguiContexts, mut players: Query<(&IsLocal, &mut PeerInfo)>) {
+    let PeerInfo {
+        name,
+        persistent_id,
+        ..
+    } = &*players.iter_mut().find(|(local, ..)| local.0).unwrap().1;
+    TopBottomPanel::bottom("bottom_panel").show(contexts.ctx_mut(), |ui| {
+        ui.horizontal(|ui| {
+            ui.label(format!("Name: {name}"));
+            ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
+                ui.label(format!("ID: {persistent_id}"));
+            });
+        });
+    });
 }
 
 #[derive(Serialize, Deserialize)]
@@ -412,8 +445,11 @@ fn lobby(
             let info_before = my_info.clone();
             ui.checkbox(&mut my_info.ready, "I'm ready");
             ui.horizontal(|ui| {
-                ui.label("Name: ");
-                ui.text_edit_singleline(&mut my_info.name);
+                ui.label("Name:");
+                ui.add(TextEdit::singleline(&mut my_info.name).clip_text(false));
+                if my_info.name.len() > 20 {
+                    my_info.name.truncate(20);
+                }
             });
             if *my_info != info_before {
                 for peer_id in connected_peers_ids {
@@ -430,6 +466,7 @@ fn lobby(
         ui.group(|ui| {
             ui.heading("Players");
             ui.separator();
+            // TODO: filter me out
             for (index, (.., peer_info)) in players.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.label(if peer_info.ready { "☑" } else { "☐" });
