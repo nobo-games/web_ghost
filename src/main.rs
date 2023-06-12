@@ -1,6 +1,14 @@
-use bevy::{math::Vec3Swizzles, prelude::*, render::camera::ScalingMode, utils::HashMap};
+use bevy::{
+    math::Vec3Swizzles,
+    prelude::*,
+    render::camera::ScalingMode,
+    utils::{HashMap, Uuid},
+};
 use bevy_asset_loader::prelude::*;
-use bevy_egui::{egui::SidePanel, EguiContexts, EguiPlugin};
+use bevy_egui::{
+    egui::{Align, Layout, SidePanel, TextEdit, TopBottomPanel},
+    EguiContexts, EguiPlugin,
+};
 use bevy_ggrs::{
     ggrs::{self, GGRSEvent, PlayerType},
     ggrs_stage::GGRSStage,
@@ -10,6 +18,7 @@ use bevy_matchbox::prelude::*;
 use components::*;
 use input::*;
 use serde::{Deserialize, Serialize};
+use web_sys::window;
 
 mod components;
 mod input;
@@ -22,6 +31,13 @@ fn main() {
         .register_rollback_component::<Transform>()
         .register_rollback_component::<BulletReady>()
         .register_rollback_component::<MoveDir>()
+        .register_rollback_component::<PersistentPeerId>()
+        .register_type_dependency::<f32>()
+        .register_type_dependency::<bool>()
+        .register_type_dependency::<String>()
+        .register_type_dependency::<Vec3>()
+        .register_type_dependency::<Vec2>()
+        .register_type_dependency::<Quat>()
         .build(&mut app);
 
     app.add_state::<GameState>()
@@ -44,9 +60,17 @@ fn main() {
         .add_system(start_matchbox_socket.in_schedule(OnEnter(GameState::Matchmaking)))
         .add_systems((
             lobby.run_if(in_state(GameState::Matchmaking)),
-            spawn_players.in_schedule(OnEnter(GameState::InGame)),
+            bottom_bar_ui.run_if(in_state(GameState::InGame)),
+            insert_player_components.in_schedule(OnEnter(GameState::InGame)),
+            load_snapshot
+                .in_schedule(OnEnter(GameState::InGame))
+                .after(insert_player_components),
+            apply_loaded_components
+                .in_schedule(OnEnter(GameState::InGame))
+                .after(insert_player_components)
+                .after(load_snapshot),
             camera_follow.run_if(in_state(GameState::InGame)),
-            delete_session.in_schedule(OnExit(GameState::InGame)),
+            cleanup_session.in_schedule(OnExit(GameState::InGame)),
             kill_game_on_disconnect.run_if(in_state(GameState::InGame)),
         ))
         .add_systems(
@@ -59,8 +83,14 @@ fn main() {
             )
                 .in_schedule(GGRSSchedule),
         )
+        .init_resource::<GameSave>()
         .run();
+
+    // TODO: use this : .run_if(resource_exists::<InputCounter>())
 }
+
+#[derive(Resource, Default)]
+struct GameSave(Option<String>);
 
 fn kill_game_on_disconnect(world: &mut World) {
     let bevy_ggrs::Session::P2PSession(session) = &mut *world
@@ -92,10 +122,29 @@ fn kill_game_on_disconnect(world: &mut World) {
             break;
         }
     }
+
+    let snapshot = world
+        .get_resource::<GGRSStage<GgrsConfig>>()
+        .unwrap()
+        .get_serialized_snapshot(world);
+    info!("Saving world snapshot: {snapshot}");
+    world.get_resource_mut::<GameSave>().unwrap().0 = Some(snapshot);
 }
 
-fn delete_session(mut commands: Commands) {
+fn load_snapshot(world: &mut World) {
+    if let Some(snapshot) = &world.get_resource_mut::<GameSave>().unwrap().0.take() {
+        info!("Loading world snapshot: {snapshot}");
+        world.resource_scope(|world, stage: Mut<GGRSStage<GgrsConfig>>| {
+            stage.load_serialized_snapshot(world, snapshot);
+        });
+    }
+}
+
+fn cleanup_session(mut commands: Commands, rollback_entities: Query<Entity, With<Rollback>>) {
     commands.remove_resource::<bevy_ggrs::Session<GgrsConfig>>();
+    for entity in rollback_entities.iter() {
+        commands.entity(entity).despawn();
+    }
 }
 
 const MAP_SIZE: u32 = 41;
@@ -141,12 +190,13 @@ fn setup(mut commands: Commands) {
     }
 }
 
-fn spawn_players(
+fn insert_player_components(
     mut commands: Commands,
     mut rip: ResMut<RollbackIdProvider>,
-    players: Query<(Entity, &Player)>,
+    players: Query<(Entity, &Player)>, // This won't find any if loaded from gamestate
 ) {
     for (entity, player) in players.iter() {
+        info!("Inserting player components, entity: {entity:?}");
         commands.entity(entity).insert((
             Rollback::new(rip.next_id()),
             SpriteBundle {
@@ -165,6 +215,42 @@ fn spawn_players(
             BulletReady(true),
             MoveDir(-Vec2::X),
         ));
+    }
+}
+
+fn apply_loaded_components(
+    mut commands: Commands,
+    new_players: Query<(Entity, &PersistentPeerId), With<Player>>,
+    loaded_players: Query<
+        (
+            Entity,
+            &PersistentPeerId,
+            &Transform,
+            &MoveDir,
+            &BulletReady,
+        ),
+        Without<Player>,
+    >,
+) {
+    for (new_entity, new_id) in new_players.iter() {
+        info!("New player: {:?}", new_id.0);
+        for (_loaded_entity, loaded_id, loaded_transform, move_dir, bullet_ready) in
+            loaded_players.iter()
+        {
+            info!("laoded player: {:?}", loaded_id.0);
+            if new_id.0 == loaded_id.0 {
+                info!("Match: {} == {}", new_id.0, loaded_id.0);
+                commands.entity(new_entity).insert((
+                    loaded_transform.clone(),
+                    move_dir.clone(),
+                    BulletReady(bullet_ready.0),
+                ));
+                break;
+            }
+        }
+    }
+    for (entity, ..) in loaded_players.iter() {
+        commands.entity(entity).despawn();
     }
 }
 
@@ -193,6 +279,22 @@ fn move_players(
     }
 }
 
+fn bottom_bar_ui(mut contexts: EguiContexts, mut players: Query<(&IsLocal, &mut PeerInfo)>) {
+    let PeerInfo {
+        name,
+        persistent_id,
+        ..
+    } = &*players.iter_mut().find(|(local, ..)| local.0).unwrap().1;
+    TopBottomPanel::bottom("bottom_panel").show(contexts.ctx_mut(), |ui| {
+        ui.horizontal(|ui| {
+            ui.label(format!("Name: {name}"));
+            ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
+                ui.label(format!("ID: {persistent_id}"));
+            });
+        });
+    });
+}
+
 #[derive(Serialize, Deserialize)]
 enum P2PMessage {
     PeerInfo(PeerInfo),
@@ -214,7 +316,11 @@ fn start_matchbox_socket(mut commands: Commands) {
 struct PeerInfo {
     ready: bool,
     name: String,
+    persistent_id: Uuid,
 }
+
+#[derive(Component, Reflect, Default)]
+struct PersistentPeerId(String);
 
 #[derive(Component)]
 pub struct IsLocal(bool);
@@ -238,11 +344,23 @@ fn lobby(
 
         let connected_peers_ids = socket.connected_peers().collect::<Vec<_>>();
         if let Some(id) = socket.id() {
+            let id_string = id.0.to_string();
+            let storage = window().unwrap().session_storage().unwrap().unwrap();
+            const KEY: &str = "matchbox_id";
+            let unique_id = if let Ok(Some(value)) = storage.get_item(KEY) {
+                value
+            } else {
+                info!("{KEY} not found, setting to {id_string}");
+                storage.set_item(KEY, &id_string).unwrap();
+                id_string.clone()
+            };
             if players.is_empty() {
                 let my_info = PeerInfo {
                     ready: false,
                     name: "Peer A".to_string(),
+                    persistent_id: Uuid::parse_str(&unique_id).unwrap(),
                 };
+                // TODO: handle case when 2 peers connect at same time??
                 for peer_id in &connected_peers_ids {
                     socket.channel(1).send(
                         bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
@@ -251,7 +369,12 @@ fn lobby(
                         *peer_id,
                     );
                 }
-                commands.spawn((MatchBoxId(id), IsLocal(true), my_info));
+                commands.spawn((
+                    MatchBoxId(id),
+                    IsLocal(true),
+                    my_info,
+                    PersistentPeerId(unique_id.to_string()),
+                ));
                 return;
             }
         } else {
@@ -301,22 +424,32 @@ fn lobby(
                         if let Some(entity) = entity {
                             commands.entity(entity).insert(info);
                         } else {
-                            commands.spawn((MatchBoxId(peer_id), IsLocal(false), info));
+                            commands.spawn((
+                                MatchBoxId(peer_id),
+                                IsLocal(false),
+                                PersistentPeerId(info.persistent_id.to_string()),
+                                info,
+                            ));
                         }
                     }
                 }
+            } else {
+                warn!("Failed to deserialize P2PMessage");
             }
         }
 
+        let mut my_info = players
+            .get_component_mut::<PeerInfo>(local_player_entity)
+            .unwrap();
         {
-            let mut my_info = players
-                .get_component_mut::<PeerInfo>(local_player_entity)
-                .unwrap();
             let info_before = my_info.clone();
             ui.checkbox(&mut my_info.ready, "I'm ready");
             ui.horizontal(|ui| {
-                ui.label("Name: ");
-                ui.text_edit_singleline(&mut my_info.name);
+                ui.label("Name:");
+                ui.add(TextEdit::singleline(&mut my_info.name).clip_text(false));
+                if my_info.name.len() > 20 {
+                    my_info.name.truncate(20);
+                }
             });
             if *my_info != info_before {
                 for peer_id in connected_peers_ids {
@@ -333,6 +466,7 @@ fn lobby(
         ui.group(|ui| {
             ui.heading("Players");
             ui.separator();
+            // TODO: filter me out
             for (index, (.., peer_info)) in players.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.label(if peer_info.ready { "☑" } else { "☐" });
@@ -376,15 +510,22 @@ fn lobby(
                 .collect::<Vec<_>>()
         })();
 
-        for (i, player) in socket_players.into_iter().enumerate() {
-            let (entity, ..) = players
-                .iter()
-                .find(|(_, id, local, ..)| match player {
-                    PlayerType::Local => local.0,
-                    PlayerType::Remote(remote_id) => remote_id == id.0,
-                    PlayerType::Spectator(spectator_id) => spectator_id == id.0,
-                })
-                .unwrap();
+        let mut socket_players = socket_players
+            .into_iter()
+            .map(|player| {
+                let (entity, .., info) = players
+                    .iter()
+                    .find(|(_, id, local, ..)| match player {
+                        PlayerType::Local => local.0,
+                        PlayerType::Remote(remote_id) => remote_id == id.0,
+                        PlayerType::Spectator(spectator_id) => spectator_id == id.0,
+                    })
+                    .unwrap();
+                (player, entity, info)
+            })
+            .collect::<Vec<_>>();
+        socket_players.sort_by_key(|(_, _, info)| info.persistent_id);
+        for (i, (player, entity, ..)) in socket_players.into_iter().enumerate() {
             if let PlayerType::Local = player {
                 commands.insert_resource(LocalPlayerHandle(i));
             }
