@@ -17,6 +17,9 @@ indexmap = "1.9"
 web-sys = { version = "0.3", features = ["Storage"] }
 chrono = { version = "0.4", features = ["serde", "wasmbind"] }
 bevycheck = "*"
+fixed = { version = "1.23", features = ["serde"] }
+bevy_reflect_derive = "0.10"
+fixed-sqrt = "0.2"
 
 [patch.crates-io]
 bevy_matchbox = { path = "../third_party/matchbox/bevy_matchbox" }

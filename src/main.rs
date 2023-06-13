@@ -17,6 +17,7 @@ use bevy_ggrs::{
 use bevy_matchbox::prelude::*;
 use chrono::{DateTime, Utc};
 use components::*;
+use fixed::traits::LossyFrom;
 use input::*;
 use serde::{Deserialize, Serialize};
 use web_sys::window;
@@ -29,16 +30,15 @@ fn main() {
 
     GGRSPlugin::<GgrsConfig>::new()
         .with_input_system(input)
-        .register_rollback_component::<Transform>()
+        .register_rollback_component::<Position>()
         .register_rollback_component::<BulletReady>()
         .register_rollback_component::<MoveDir>()
         .register_rollback_component::<PersistentPeerId>()
-        .register_type_dependency::<f32>()
         .register_type_dependency::<bool>()
         .register_type_dependency::<String>()
-        .register_type_dependency::<Vec3>()
+        .register_type_dependency::<SpatialFixed>()
+        .register_type_dependency::<Vec2Fixed>()
         .register_type_dependency::<Vec2>()
-        .register_type_dependency::<Quat>()
         .build(&mut app);
 
     app.add_state::<GameState>()
@@ -77,6 +77,7 @@ fn main() {
         .add_systems(
             (
                 move_players,
+                set_translations_to_positions.after(move_players),
                 reload_bullet,
                 fire_bullets.after(move_players).after(reload_bullet),
                 move_bullet.after(move_players).after(fire_bullets),
@@ -226,7 +227,7 @@ fn insert_player_components(
                 ..default()
             },
             BulletReady(true),
-            MoveDir(-Vec2::X),
+            MoveDir((-Vec2::X).into()),
         ));
     }
 }
@@ -269,26 +270,38 @@ fn apply_loaded_components(
 
 fn move_players(
     inputs: Res<PlayerInputs<GgrsConfig>>,
-    mut player_query: Query<(&mut Transform, &mut MoveDir, &Player)>,
+    mut player_query: Query<(&mut Position, &mut MoveDir, &Player)>,
 ) {
-    for (mut transform, mut move_dir, player) in player_query.iter_mut() {
+    for (mut position, mut move_dir, player) in player_query.iter_mut() {
         let (input, _) = inputs[player.handle];
         let direction = direction(input);
 
-        if direction == Vec2::ZERO {
+        if direction == Vec2::ZERO.into() {
             continue;
         }
         move_dir.0 = direction;
 
-        let move_speed = 0.13;
+        let move_speed = SpatiatialFixedInner::from_num(0.13);
         let move_delta = direction * move_speed;
 
-        let old_pos = transform.translation.xy();
-        let limit = Vec2::splat(MAP_SIZE as f32 / 2. - 0.5);
+        let old_pos = position;
+        const WIDTH: SpatiatialFixedInner =
+            SpatiatialFixedInner::from(MAP_SIZE) / 2.into() - 0.5.into();
+        let limit = Vec2Fixed {
+            x: SpatialFixed(WIDTH),
+            y: SpatialFixed(WIDTH),
+        };
         let new_pos = (old_pos + move_delta).clamp(-limit, limit);
 
-        transform.translation.x = new_pos.x;
-        transform.translation.y = new_pos.y;
+        position.x = new_pos.x;
+        position.y = new_pos.y;
+    }
+}
+
+fn set_translations_to_positions(mut entities: Query<(&mut Transform, &Position)>) {
+    for (mut transform, position) in entities.iter_mut() {
+        transform.translation.x = position.0.x.0.to_num();
+        transform.translation.y = position.0.y.0.to_num();
     }
 }
 
