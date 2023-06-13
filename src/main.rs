@@ -15,6 +15,7 @@ use bevy_ggrs::{
     GGRSPlugin, GGRSSchedule, PlayerInputs, Rollback, RollbackIdProvider,
 };
 use bevy_matchbox::prelude::*;
+use chrono::{DateTime, Utc};
 use components::*;
 use input::*;
 use serde::{Deserialize, Serialize};
@@ -89,8 +90,14 @@ fn main() {
     // TODO: use this : .run_if(resource_exists::<InputCounter>())
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct GameSaveData {
+    snapshot: String,
+    timestamp: DateTime<Utc>,
+}
+
 #[derive(Resource, Default)]
-struct GameSave(Option<String>);
+struct GameSave(Option<GameSaveData>);
 
 fn kill_game_on_disconnect(world: &mut World) {
     let bevy_ggrs::Session::P2PSession(session) = &mut *world
@@ -128,14 +135,20 @@ fn kill_game_on_disconnect(world: &mut World) {
         .unwrap()
         .get_serialized_snapshot(world);
     info!("Saving world snapshot: {snapshot}");
-    world.get_resource_mut::<GameSave>().unwrap().0 = Some(snapshot);
+    world.get_resource_mut::<GameSave>().unwrap().0 = Some(GameSaveData {
+        snapshot,
+        timestamp: Utc::now(),
+    });
 }
 
 fn load_snapshot(world: &mut World) {
     if let Some(snapshot) = &world.get_resource_mut::<GameSave>().unwrap().0.take() {
-        info!("Loading world snapshot: {snapshot}");
+        info!(
+            "Loading world snapshot from {}: {}",
+            snapshot.timestamp, snapshot.snapshot
+        );
         world.resource_scope(|world, stage: Mut<GGRSStage<GgrsConfig>>| {
-            stage.load_serialized_snapshot(world, snapshot);
+            stage.load_serialized_snapshot(world, &snapshot.snapshot);
         });
     }
 }
@@ -298,6 +311,7 @@ fn bottom_bar_ui(mut contexts: EguiContexts, mut players: Query<(&IsLocal, &mut 
 #[derive(Serialize, Deserialize)]
 enum P2PMessage {
     PeerInfo(PeerInfo),
+    GameSave(Option<GameSaveData>),
 }
 
 fn start_matchbox_socket(mut commands: Commands) {
@@ -336,6 +350,8 @@ fn lobby(
     mut next_state: ResMut<NextState<GameState>>,
     mut contexts: EguiContexts,
     mut players: Query<(Entity, &MatchBoxId, &IsLocal, &mut PeerInfo)>,
+    mut my_gamesave: ResMut<GameSave>,
+    mut gamesaves: Local<HashMap<PeerId, Option<GameSaveData>>>,
 ) {
     SidePanel::left("left_panel").show(contexts.ctx_mut(), |ui| {
         if socket.get_channel(0).is_err() {
@@ -343,60 +359,77 @@ fn lobby(
         }
 
         let connected_peers_ids = socket.connected_peers().collect::<Vec<_>>();
-        if let Some(id) = socket.id() {
-            let id_string = id.0.to_string();
-            let storage = window().unwrap().session_storage().unwrap().unwrap();
-            const KEY: &str = "matchbox_id";
-            let unique_id = if let Ok(Some(value)) = storage.get_item(KEY) {
-                value
-            } else {
-                info!("{KEY} not found, setting to {id_string}");
-                storage.set_item(KEY, &id_string).unwrap();
-                id_string.clone()
-            };
-            if players.is_empty() {
-                let my_info = PeerInfo {
-                    ready: false,
-                    name: "Peer A".to_string(),
-                    persistent_id: Uuid::parse_str(&unique_id).unwrap(),
-                };
-                // TODO: handle case when 2 peers connect at same time??
-                for peer_id in &connected_peers_ids {
-                    socket.channel(1).send(
-                        bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
-                            .unwrap()
-                            .into_boxed_slice(),
-                        *peer_id,
-                    );
-                }
-                commands.spawn((
-                    MatchBoxId(id),
-                    IsLocal(true),
-                    my_info,
-                    PersistentPeerId(unique_id.to_string()),
-                ));
-                return;
-            }
+        let Some(id) = socket.id() else {
+            return ;
+        };
+
+        let id_string = id.0.to_string();
+        let storage = window().unwrap().session_storage().unwrap().unwrap();
+        const KEY: &str = "matchbox_id";
+        let unique_id = if let Ok(Some(value)) = storage.get_item(KEY) {
+            value
         } else {
+            info!("{KEY} not found, setting to {id_string}");
+            storage.set_item(KEY, &id_string).unwrap();
+            id_string.clone()
+        };
+
+        if players.is_empty() {
+            let my_info = PeerInfo {
+                ready: false,
+                name: "Peer A".to_string(),
+                persistent_id: Uuid::parse_str(&unique_id).unwrap(),
+            };
+            gamesaves.insert(id, my_gamesave.0.clone());
+            // TODO: handle case when 2 peers connect at same time??
+            // TODO: store as cookies too in hashmap, then use session storage to store key for latest cookie
+            for peer in &connected_peers_ids {
+                socket.channel(1).send(
+                    bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
+                        .unwrap()
+                        .into_boxed_slice(),
+                    *peer,
+                );
+                socket.channel(1).send(
+                    bincode::serialize(&P2PMessage::GameSave(
+                        my_gamesave.0.as_ref().map(|g| g.clone()),
+                    ))
+                    .unwrap()
+                    .into_boxed_slice(),
+                    *peer,
+                );
+            }
+            commands.spawn((
+                MatchBoxId(id),
+                IsLocal(true),
+                my_info,
+                PersistentPeerId(unique_id.to_string()),
+            ));
             return;
         }
 
         let local_player_entity = players.iter().filter(|p| p.2 .0).next().unwrap().0;
+        let my_info = players
+            .get_component::<PeerInfo>(local_player_entity)
+            .unwrap();
 
         // Check for new connections
         for (peer, state) in socket.update_peers() {
             match state {
                 PeerState::Connected => {
                     info!("Peer joined: {:?}", peer);
-                    let my_info = players
-                        .get_component::<PeerInfo>(local_player_entity)
-                        .unwrap()
-                        .clone();
-
                     socket.channel(1).send(
-                        bincode::serialize(&P2PMessage::PeerInfo(my_info))
+                        bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
                             .unwrap()
                             .into_boxed_slice(),
+                        peer,
+                    );
+                    socket.channel(1).send(
+                        bincode::serialize(&P2PMessage::GameSave(
+                            my_gamesave.0.as_ref().map(|g| g.clone()),
+                        ))
+                        .unwrap()
+                        .into_boxed_slice(),
                         peer,
                     );
                 }
@@ -431,6 +464,9 @@ fn lobby(
                                 info,
                             ));
                         }
+                    }
+                    P2PMessage::GameSave(game_save) => {
+                        gamesaves.insert(peer_id, game_save);
                     }
                 }
             } else {
@@ -481,17 +517,32 @@ fn lobby(
 
         info!("All peers are ready, starting game");
 
+        // Hopefully this sorting will resolve the same way on all peers
+        my_gamesave.0 = gamesaves
+            .drain()
+            .reduce(|acc, x| match (&acc.1, &x.1) {
+                (Some(acc_save), Some(x_save)) => {
+                    if acc_save.timestamp > x_save.timestamp {
+                        acc
+                    } else if acc_save.timestamp < x_save.timestamp {
+                        x
+                    } else if acc.0 > x.0 {
+                        acc
+                    } else {
+                        x
+                    }
+                }
+                (None, Some(_)) => x,
+                _ => acc,
+            })
+            .unwrap()
+            .1;
+
         // create a GGRS P2P session
         let mut session_builder = ggrs::SessionBuilder::<GgrsConfig>::new()
             .with_num_players(players.iter().len())
             .with_input_delay(0);
-        let socket_players = (|| {
-            let Some(our_id) = socket.id() else {
-                // we're still waiting for the server to initialize our id
-                // no peers should be added at this point anyway
-                return vec![PlayerType::Local];
-            };
-
+        let socket_players = if let Some(our_id) = socket.id() {
             // player order needs to be consistent order across all peers
             let mut ids: Vec<_> = socket
                 .connected_peers()
@@ -508,7 +559,11 @@ fn lobby(
                     }
                 })
                 .collect::<Vec<_>>()
-        })();
+        } else {
+            // we're still waiting for the server to initialize our id
+            // no peers should be added at this point anyway
+            vec![PlayerType::Local]
+        };
 
         let mut socket_players = socket_players
             .into_iter()
