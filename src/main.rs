@@ -1,5 +1,4 @@
 use bevy::{
-    math::Vec3Swizzles,
     prelude::*,
     render::camera::ScalingMode,
     utils::{HashMap, Uuid},
@@ -17,7 +16,6 @@ use bevy_ggrs::{
 use bevy_matchbox::prelude::*;
 use chrono::{DateTime, Utc};
 use components::*;
-use fixed::traits::LossyFrom;
 use input::*;
 use serde::{Deserialize, Serialize};
 use web_sys::window;
@@ -38,7 +36,6 @@ fn main() {
         .register_type_dependency::<String>()
         .register_type_dependency::<SpatialFixed>()
         .register_type_dependency::<Vec2Fixed>()
-        .register_type_dependency::<Vec2>()
         .build(&mut app);
 
     app.add_state::<GameState>()
@@ -77,7 +74,9 @@ fn main() {
         .add_systems(
             (
                 move_players,
-                set_translations_to_positions.after(move_players),
+                set_translations_to_positions
+                    .after(move_players)
+                    .after(move_bullet),
                 reload_bullet,
                 fire_bullets.after(move_players).after(reload_bullet),
                 move_bullet.after(move_players).after(fire_bullets),
@@ -211,24 +210,26 @@ fn insert_player_components(
 ) {
     for (entity, player) in players.iter() {
         info!("Inserting player components, entity: {entity:?}");
-        commands.entity(entity).insert((
-            Rollback::new(rip.next_id()),
-            SpriteBundle {
-                transform: Transform::from_translation(Vec3::new(
-                    -8. + 2. * player.handle as f32,
-                    0.,
-                    100.,
-                )),
-                sprite: Sprite {
-                    color: Color::rgb(0., 0.47, 1.),
-                    custom_size: Some(Vec2::new(1., 1.)),
+        commands
+            .entity(entity)
+            .insert((
+                Rollback::new(rip.next_id()),
+                SpriteBundle {
+                    transform: Transform::from_translation(Vec3::new(0., 0., 100.)),
+                    sprite: Sprite {
+                        color: Color::rgb(0., 0.47, 1.),
+                        custom_size: Some(Vec2::new(1., 1.)),
+                        ..default()
+                    },
                     ..default()
                 },
-                ..default()
-            },
-            BulletReady(true),
-            MoveDir((-Vec2::X).into()),
-        ));
+                BulletReady(true),
+                MoveDir((-Vec2::X).into()),
+            ))
+            .insert(Position(Vec2Fixed {
+                x: SpatialFixed::from_num(-8. + 2. * player.handle as f32),
+                y: SpatialFixed::from_num(0.0),
+            }));
     }
 }
 
@@ -236,13 +237,7 @@ fn apply_loaded_components(
     mut commands: Commands,
     new_players: Query<(Entity, &PersistentPeerId), With<Player>>,
     loaded_players: Query<
-        (
-            Entity,
-            &PersistentPeerId,
-            &Transform,
-            &MoveDir,
-            &BulletReady,
-        ),
+        (Entity, &PersistentPeerId, &Position, &MoveDir, &BulletReady),
         Without<Player>,
     >,
 ) {
@@ -281,20 +276,20 @@ fn move_players(
         }
         move_dir.0 = direction;
 
-        let move_speed = SpatiatialFixedInner::from_num(0.13);
+        let move_speed = SpatialFixedInner::from_num(0.13);
         let move_delta = direction * move_speed;
 
-        let old_pos = position;
-        const WIDTH: SpatiatialFixedInner =
-            SpatiatialFixedInner::from(MAP_SIZE) / 2.into() - 0.5.into();
+        let old_pos = position.0;
+        let width = SpatialFixedInner::from_num(MAP_SIZE) / 2 - SpatialFixedInner::from_num(0.5);
         let limit = Vec2Fixed {
-            x: SpatialFixed(WIDTH),
-            y: SpatialFixed(WIDTH),
+            x: SpatialFixed(width),
+            y: SpatialFixed(width),
         };
+
         let new_pos = (old_pos + move_delta).clamp(-limit, limit);
 
-        position.x = new_pos.x;
-        position.y = new_pos.y;
+        position.0.x = new_pos.x;
+        position.0.y = new_pos.y;
     }
 }
 
@@ -671,20 +666,21 @@ fn fire_bullets(
     mut commands: Commands,
     inputs: Res<PlayerInputs<GgrsConfig>>,
     images: Res<ImageAssets>,
-    mut player_query: Query<(&Transform, &Player, &mut BulletReady, &MoveDir)>,
+    mut player_query: Query<(&Position, &Player, &mut BulletReady, &MoveDir)>,
     mut rip: ResMut<RollbackIdProvider>,
 ) {
     for (transform, player, mut bullet_ready, move_dir) in player_query.iter_mut() {
         let (input, _) = inputs[player.handle];
         if fire(input) && bullet_ready.0 {
-            let player_pos = transform.translation.xy();
-            let pos = player_pos + move_dir.0 * PLAYER_RADIUS + BULLET_RADIUS;
+            let player_pos = transform.0;
+            let pos = player_pos
+                + (move_dir.0) * SpatialFixedInner::from_num(PLAYER_RADIUS + BULLET_RADIUS);
             commands.spawn((
                 Bullet,
                 move_dir.clone(),
                 SpriteBundle {
-                    transform: Transform::from_translation(pos.extend(200.))
-                        .with_rotation(Quat::from_rotation_arc_2d(Vec2::X, move_dir.0)),
+                    transform: Transform::from_translation(Vec2::from(pos).extend(200.))
+                        .with_rotation(Quat::from_rotation_arc_2d(Vec2::X, Vec2::from(move_dir.0))),
                     texture: images.bullet.clone(),
                     sprite: Sprite {
                         custom_size: Some(Vec2::new(0.3, 0.1)),
@@ -699,10 +695,9 @@ fn fire_bullets(
     }
 }
 
-fn move_bullet(mut query: Query<(&mut Transform, &MoveDir), With<Bullet>>) {
+fn move_bullet(mut query: Query<(&mut Position, &MoveDir), With<Bullet>>) {
     for (mut transform, dir) in query.iter_mut() {
-        let delta = (dir.0 * 0.35).extend(0.);
-        transform.translation += delta;
+        transform.0 += dir.0 * SpatialFixedInner::from_num(0.35);
     }
 }
 
@@ -726,15 +721,12 @@ const BULLET_RADIUS: f32 = 0.025;
 
 fn kill_players(
     mut commands: Commands,
-    player_query: Query<(Entity, &Transform), (With<Player>, Without<Bullet>)>,
-    bullet_query: Query<&Transform, With<Bullet>>,
+    player_query: Query<(Entity, &Position), (With<Player>, Without<Bullet>)>,
+    bullet_query: Query<&Position, With<Bullet>>,
 ) {
     for (player, player_transform) in player_query.iter() {
         for bullet_transform in bullet_query.iter() {
-            let distance = Vec2::distance(
-                player_transform.translation.xy(),
-                bullet_transform.translation.xy(),
-            );
+            let distance = (player_transform.0 - bullet_transform.0).norm();
             if distance < PLAYER_RADIUS + BULLET_RADIUS {
                 commands.entity(player).remove::<SpriteBundle>();
             }

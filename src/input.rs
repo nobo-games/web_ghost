@@ -1,7 +1,6 @@
-use crate::components::{SpatiatialFixedInner, Vec2Fixed};
+use crate::components::{SpatialFixedInner, Vec2Fixed};
 use bevy::prelude::*;
 use bevy_ggrs::ggrs::PlayerHandle;
-use fixed_sqrt::FixedSqrt;
 
 const INPUT_UP: u8 = 1 << 0;
 const INPUT_DOWN: u8 = 1 << 1;
@@ -33,23 +32,20 @@ pub fn input(_: In<PlayerHandle>, keys: Res<Input<KeyCode>>) -> u8 {
 
 pub fn direction(input: u8) -> Vec2Fixed {
     let mut direction: Vec2Fixed = Vec2::ZERO.into();
-    const ONE: SpatiatialFixedInner = SpatiatialFixedInner::from_num(1.0);
+    let one = SpatialFixedInner::from_num(1.0);
     if input & INPUT_UP != 0 {
-        direction.y.0 += ONE;
+        direction.y.0 += one;
     }
     if input & INPUT_DOWN != 0 {
-        direction.y.0 -= ONE;
+        direction.y.0 -= one;
     }
     if input & INPUT_RIGHT != 0 {
-        direction.x.0 += ONE;
+        direction.x.0 += one;
     }
     if input & INPUT_LEFT != 0 {
-        direction.x.0 -= ONE;
+        direction.x.0 -= one;
     }
-    let len = (direction.x.0 * direction.x.0 + direction.y.0 * direction.y.0).sqrt();
-    direction.x.0 /= len;
-    direction.y.0 /= len;
-    direction
+    direction.normalize_or_zero()
 }
 
 pub fn fire(input: u8) -> bool {
