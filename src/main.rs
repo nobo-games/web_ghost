@@ -410,21 +410,26 @@ fn fire_bullets(
             let player_pos = transform.0;
             let pos = player_pos
                 + (move_dir.0) * SpatialFixedInner::from_num(PLAYER_RADIUS + BULLET_RADIUS);
-            commands.spawn((
-                Bullet,
-                move_dir.clone(),
-                SpriteBundle {
-                    transform: Transform::from_translation(Vec2::from(pos).extend(200.))
-                        .with_rotation(Quat::from_rotation_arc_2d(Vec2::X, Vec2::from(move_dir.0))),
-                    texture: images.bullet.clone(),
-                    sprite: Sprite {
-                        custom_size: Some(Vec2::new(0.3, 0.1)),
+            commands
+                .spawn((
+                    Bullet,
+                    move_dir.clone(),
+                    SpriteBundle {
+                        transform: Transform::from_translation(Vec2::from(pos).extend(200.))
+                            .with_rotation(Quat::from_rotation_arc_2d(
+                                Vec2::X,
+                                Vec2::from(move_dir.0),
+                            )),
+                        texture: images.bullet.clone(),
+                        sprite: Sprite {
+                            custom_size: Some(Vec2::new(0.3, 0.1)),
+                            ..default()
+                        },
                         ..default()
                     },
-                    ..default()
-                },
-                Rollback::new(rip.next_id()),
-            ));
+                    Rollback::new(rip.next_id()),
+                ))
+                .insert(Position(pos));
             bullet_ready.0 = false;
         }
     }

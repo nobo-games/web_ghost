@@ -21,7 +21,7 @@ impl_reflect_value!(SpatialFixed(
     Default
 ));
 
-#[derive(Reflect, Default, Clone, Copy, PartialEq)]
+#[derive(Reflect, Default, Clone, Copy, PartialEq, Debug)]
 pub struct Vec2Fixed {
     pub x: SpatialFixed,
     pub y: SpatialFixed,
@@ -97,7 +97,12 @@ impl Vec2Fixed {
     }
 
     pub fn norm_sq(&self) -> SpatialFixedInner {
-        self.x.0 * self.x.0 + self.y.0 * self.y.0
+        let norm_sq = self.x.0 * self.x.0 + self.y.0 * self.y.0;
+        if norm_sq < 0 {
+            SpatialFixedInner::from_num(0)
+        } else {
+            norm_sq
+        }
     }
 
     pub fn norm(&self) -> SpatialFixedInner {
