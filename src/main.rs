@@ -16,11 +16,13 @@ use bevy_ggrs::{
 use bevy_matchbox::prelude::*;
 use chrono::{DateTime, Utc};
 use components::*;
+use fixed_point::{SpatialFixed, SpatialFixedInner, Vec2Fixed};
 use input::*;
 use serde::{Deserialize, Serialize};
 use web_sys::window;
 
 mod components;
+mod fixed_point;
 mod input;
 
 fn main() {

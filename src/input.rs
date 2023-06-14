@@ -1,6 +1,7 @@
-use crate::components::{SpatialFixedInner, Vec2Fixed};
 use bevy::prelude::*;
 use bevy_ggrs::ggrs::PlayerHandle;
+
+use crate::fixed_point::{SpatialFixedInner, Vec2Fixed};
 
 const INPUT_UP: u8 = 1 << 0;
 const INPUT_DOWN: u8 = 1 << 1;
