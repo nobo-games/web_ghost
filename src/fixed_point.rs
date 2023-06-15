@@ -1,19 +1,26 @@
 use bevy::prelude::*;
 use bevy_reflect_derive::impl_reflect_value;
-use fixed::types::I20F12;
+use fixed::{traits::ToFixed, types::I20F12};
 use serde::{Deserialize, Serialize};
-pub type SpatialFixedInner = I20F12;
+pub type Fixed = I20F12;
 
 #[derive(Default, Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Deref, DerefMut)]
-pub struct SpatialFixed(pub SpatialFixedInner);
+pub struct FixedWrapped(pub Fixed);
 
-impl SpatialFixed {
-    pub fn from_num(num: f32) -> Self {
-        Self(SpatialFixedInner::from_num(num))
+pub trait Fix {
+    fn fix(self) -> Fixed;
+}
+
+impl<T> Fix for T
+where
+    T: ToFixed,
+{
+    fn fix(self) -> Fixed {
+        self.to_fixed()
     }
 }
 
-impl_reflect_value!(SpatialFixed(
+impl_reflect_value!(FixedWrapped(
     Debug,
     PartialEq,
     Serialize,
@@ -23,17 +30,8 @@ impl_reflect_value!(SpatialFixed(
 
 #[derive(Reflect, Default, Clone, Copy, PartialEq, Debug)]
 pub struct Vec2Fixed {
-    pub x: SpatialFixed,
-    pub y: SpatialFixed,
-}
-
-impl From<Vec2> for Vec2Fixed {
-    fn from(v: Vec2) -> Self {
-        Self {
-            x: SpatialFixed(I20F12::from_num(v.x)),
-            y: SpatialFixed(I20F12::from_num(v.y)),
-        }
-    }
+    pub x: FixedWrapped,
+    pub y: FixedWrapped,
 }
 
 impl From<Vec2Fixed> for Vec2 {
@@ -42,12 +40,12 @@ impl From<Vec2Fixed> for Vec2 {
     }
 }
 
-impl std::ops::Mul<SpatialFixedInner> for Vec2Fixed {
+impl std::ops::Mul<Fixed> for Vec2Fixed {
     type Output = Self;
-    fn mul(self, rhs: SpatialFixedInner) -> Self::Output {
+    fn mul(self, rhs: Fixed) -> Self::Output {
         Self {
-            x: SpatialFixed(self.x.0 * rhs),
-            y: SpatialFixed(self.y.0 * rhs),
+            x: FixedWrapped(self.x.0 * rhs),
+            y: FixedWrapped(self.y.0 * rhs),
         }
     }
 }
@@ -55,8 +53,8 @@ impl std::ops::Add<Vec2Fixed> for Vec2Fixed {
     type Output = Self;
     fn add(self, rhs: Vec2Fixed) -> Self::Output {
         Self {
-            x: SpatialFixed(self.x.0 + rhs.x.0),
-            y: SpatialFixed(self.y.0 + rhs.y.0),
+            x: FixedWrapped(self.x.0 + rhs.x.0),
+            y: FixedWrapped(self.y.0 + rhs.y.0),
         }
     }
 }
@@ -72,8 +70,8 @@ impl std::ops::Sub<Vec2Fixed> for Vec2Fixed {
     type Output = Self;
     fn sub(self, rhs: Vec2Fixed) -> Self::Output {
         Self {
-            x: SpatialFixed(self.x.0 - rhs.x.0),
-            y: SpatialFixed(self.y.0 - rhs.y.0),
+            x: FixedWrapped(self.x.0 - rhs.x.0),
+            y: FixedWrapped(self.y.0 - rhs.y.0),
         }
     }
 }
@@ -82,30 +80,37 @@ impl std::ops::Neg for Vec2Fixed {
     type Output = Self;
     fn neg(self) -> Self::Output {
         Self {
-            x: SpatialFixed(-self.x.0),
-            y: SpatialFixed(-self.y.0),
+            x: FixedWrapped(-self.x.0),
+            y: FixedWrapped(-self.y.0),
         }
     }
 }
 
 impl Vec2Fixed {
-    pub fn clamp(self, min: Vec2Fixed, max: Vec2Fixed) -> Self {
+    pub fn new(x: impl ToFixed, y: impl ToFixed) -> Self {
         Self {
-            x: SpatialFixed(self.x.0.clamp(min.x.0, max.x.0)),
-            y: SpatialFixed(self.y.0.clamp(min.y.0, max.y.0)),
+            x: FixedWrapped(x.fix()),
+            y: FixedWrapped(y.fix()),
         }
     }
 
-    pub fn norm_sq(&self) -> SpatialFixedInner {
+    pub fn clamp(self, min: Vec2Fixed, max: Vec2Fixed) -> Self {
+        Self {
+            x: FixedWrapped(self.x.0.clamp(min.x.0, max.x.0)),
+            y: FixedWrapped(self.y.0.clamp(min.y.0, max.y.0)),
+        }
+    }
+
+    pub fn norm_sq(&self) -> Fixed {
         let norm_sq = self.x.0 * self.x.0 + self.y.0 * self.y.0;
         if norm_sq < 0 {
-            SpatialFixedInner::from_num(0)
+            0.fix()
         } else {
             norm_sq
         }
     }
 
-    pub fn norm(&self) -> SpatialFixedInner {
+    pub fn norm(&self) -> Fixed {
         use fixed_sqrt::FixedSqrt;
         self.norm_sq().sqrt()
     }

@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_ggrs::ggrs::PlayerHandle;
 
-use crate::fixed_point::{SpatialFixedInner, Vec2Fixed};
+use crate::fixed_point::{Fix, Vec2Fixed};
 
 const INPUT_UP: u8 = 1 << 0;
 const INPUT_DOWN: u8 = 1 << 1;
@@ -32,8 +32,8 @@ pub fn input(_: In<PlayerHandle>, keys: Res<Input<KeyCode>>) -> u8 {
 }
 
 pub fn direction(input: u8) -> Vec2Fixed {
-    let mut direction: Vec2Fixed = Vec2::ZERO.into();
-    let one = SpatialFixedInner::from_num(1.0);
+    let mut direction = Vec2Fixed::new(0.fix(), 0.fix());
+    let one = 1.fix();
     if input & INPUT_UP != 0 {
         direction.y.0 += one;
     }

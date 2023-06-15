@@ -16,10 +16,12 @@ use bevy_ggrs::{
 use bevy_matchbox::prelude::*;
 use chrono::{DateTime, Utc};
 use components::*;
-use fixed_point::{SpatialFixed, SpatialFixedInner, Vec2Fixed};
+use fixed_point::{Fixed, FixedWrapped, Vec2Fixed};
 use input::*;
 use lobby::LobbyPlugin;
 use serde::{Deserialize, Serialize};
+
+use crate::fixed_point::Fix;
 
 mod components;
 mod fixed_point;
@@ -37,7 +39,7 @@ fn main() {
         .register_rollback_component::<PersistentPeerId>()
         .register_type_dependency::<bool>()
         .register_type_dependency::<String>()
-        .register_type_dependency::<SpatialFixed>()
+        .register_type_dependency::<FixedWrapped>()
         .register_type_dependency::<Vec2Fixed>()
         .build(&mut app);
 
@@ -227,12 +229,12 @@ fn insert_player_components(
                     ..default()
                 },
                 BulletReady(true),
-                MoveDir((-Vec2::X).into()),
+                MoveDir(-Vec2Fixed::new(1, 0)),
             ))
-            .insert(Position(Vec2Fixed {
-                x: SpatialFixed::from_num(-8. + 2. * player.handle as f32),
-                y: SpatialFixed::from_num(0.0),
-            }));
+            .insert(Position(Vec2Fixed::new(
+                -8.fix() + 2 * player.handle.fix(),
+                0,
+            )));
     }
 }
 
@@ -274,19 +276,19 @@ fn move_players(
         let (input, _) = inputs[player.handle];
         let direction = direction(input);
 
-        if direction == Vec2::ZERO.into() {
+        if direction == Vec2Fixed::new(0, 0) {
             continue;
         }
         move_dir.0 = direction;
 
-        let move_speed = SpatialFixedInner::from_num(0.13);
+        let move_speed = 13.fix() / 100;
         let move_delta = direction * move_speed;
 
         let old_pos = position.0;
-        let width = SpatialFixedInner::from_num(MAP_SIZE) / 2 - SpatialFixedInner::from_num(0.5);
+        let width = (MAP_SIZE.fix() + 1.fix()) / 2;
         let limit = Vec2Fixed {
-            x: SpatialFixed(width),
-            y: SpatialFixed(width),
+            x: FixedWrapped(width),
+            y: FixedWrapped(width),
         };
 
         let new_pos = (old_pos + move_delta).clamp(-limit, limit);
@@ -408,8 +410,7 @@ fn fire_bullets(
         let (input, _) = inputs[player.handle];
         if fire(input) && bullet_ready.0 {
             let player_pos = transform.0;
-            let pos = player_pos
-                + (move_dir.0) * SpatialFixedInner::from_num(PLAYER_RADIUS + BULLET_RADIUS);
+            let pos = player_pos + (move_dir.0) * Fixed::from_num(PLAYER_RADIUS + BULLET_RADIUS);
             commands
                 .spawn((
                     Bullet,
@@ -437,7 +438,7 @@ fn fire_bullets(
 
 fn move_bullet(mut query: Query<(&mut Position, &MoveDir), With<Bullet>>) {
     for (mut transform, dir) in query.iter_mut() {
-        transform.0 += dir.0 * SpatialFixedInner::from_num(0.35);
+        transform.0 += dir.0 * Fixed::from_num(0.35);
     }
 }
 
