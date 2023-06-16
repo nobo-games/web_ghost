@@ -22,8 +22,11 @@ bevy_reflect_derive = "0.10"
 fixed-sqrt = "0.2"
 
 [patch.crates-io]
-bevy_matchbox = { path = "../third_party/matchbox/bevy_matchbox" }
-bevy_ggrs = { path = "../third_party/bevy_ggrs" }
+# bevy_matchbox = { path = "../third_party/matchbox/bevy_matchbox" }
+bevy_matchbox = { git = "https://github.com/samcarey/matchbox.git", rev = "823aa327247ce1f83b97dd51f951d941eea4a873" }
+
+# bevy_ggrs = { path = "../third_party/bevy_ggrs" }
+bevy_ggrs = { git = "https://github.com/nobo-games/bevy_ggrs.git", rev = "3a5c7a81953bce19e1bae810c47be4a8c76eb512" }
 
 
 # Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes

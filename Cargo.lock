@@ -888,6 +888,7 @@ dependencies = [
 [[package]]
 name = "bevy_ggrs"
 version = "0.12.0"
+source = "git+https://github.com/nobo-games/bevy_ggrs.git?rev=3a5c7a81953bce19e1bae810c47be4a8c76eb512#3a5c7a81953bce19e1bae810c47be4a8c76eb512"
 dependencies = [
  "bevy",
  "bytemuck",
@@ -1038,6 +1039,7 @@ dependencies = [
 [[package]]
 name = "bevy_matchbox"
 version = "0.6.0"
+source = "git+https://github.com/samcarey/matchbox.git?rev=823aa327247ce1f83b97dd51f951d941eea4a873#823aa327247ce1f83b97dd51f951d941eea4a873"
 dependencies = [
  "bevy",
  "matchbox_socket",
@@ -3404,6 +3406,7 @@ dependencies = [
 [[package]]
 name = "matchbox_protocol"
 version = "0.6.0"
+source = "git+https://github.com/samcarey/matchbox.git?rev=823aa327247ce1f83b97dd51f951d941eea4a873#823aa327247ce1f83b97dd51f951d941eea4a873"
 dependencies = [
  "cfg-if",
  "derive_more",
@@ -3414,6 +3417,7 @@ dependencies = [
 [[package]]
 name = "matchbox_socket"
 version = "0.6.1"
+source = "git+https://github.com/samcarey/matchbox.git?rev=823aa327247ce1f83b97dd51f951d941eea4a873#823aa327247ce1f83b97dd51f951d941eea4a873"
 dependencies = [
  "async-compat",
  "async-trait",
