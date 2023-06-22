@@ -329,7 +329,7 @@ enum P2PMessage {
 
 fn start_matchbox_socket(mut commands: Commands) {
     // let room_url = "ws://127.0.0.1:3536/web_ghost";
-    let room_url = "wss://35.164.2.79/web_ghost";
+    let room_url = "wss://areyougoingserver.solve.social/web_ghost";
     info!("connecting to matchbox server: {:?}", room_url);
     commands.insert_resource(MatchboxSocket::from(
         WebRtcSocketBuilder::new(room_url)
