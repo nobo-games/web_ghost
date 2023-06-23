@@ -1,5 +1,5 @@
 use crate::{
-    components::{IsLocal, MatchBoxId, PersistentPeerId, Player},
+    components::{IsLocal, MatchBoxId, Player, TabId},
     GameSave, GameSaveData, GameState, GgrsConfig, LocalPlayerHandle, P2PMessage, PeerInfo,
 };
 use bevy::{prelude::*, utils::Uuid};
@@ -12,37 +12,137 @@ use bevy_matchbox::{
     prelude::{MultipleChannels, PeerId, PeerState},
     MatchboxSocket,
 };
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, fmt::Debug};
+use wasm_cookies::CookieOptions;
 use web_sys::window;
 
 pub struct LobbyPlugin;
 
+macro_rules! add_local_property {
+    ($app: ident, $t:ty) => {
+        $app.add_system(
+            update_local_property::<$t>
+                .run_if(in_state(GameState::Matchmaking))
+                .run_if(resource_exists::<$t>())
+                .run_if(resource_exists::<LocalMetaData>()),
+        )
+        .add_system(
+            set_local_property::<$t>
+                .run_if(in_state(GameState::Matchmaking))
+                .run_if(resource_exists::<LocalMetaData>()),
+        );
+    };
+}
+
 impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems((
-            get_local_id.run_if(in_state(GameState::Matchmaking)),
+            set_local_metadata.run_if(in_state(GameState::Matchmaking)),
             lobby
                 .run_if(in_state(GameState::Matchmaking))
-                .run_if(resource_exists::<LocalPeerId>()),
+                .run_if(resource_exists::<ScreenName>())
+                .run_if(resource_exists::<LocalMetaData>()),
         ));
+        add_local_property!(app, ScreenName);
     }
 }
 
 #[derive(Resource)]
-struct LocalPeerId {
-    id: PeerId,
-    id_string: String,
+struct LocalMetaData {
+    peer_id: PeerId,
+    tab_id: String,
 }
 
-fn get_local_id(mut commands: Commands, socket: Res<MatchboxSocket<MultipleChannels>>) {
-    if let Some(id) = socket.id() {
-        commands.insert_resource(LocalPeerId {
-            id_string: id.0.to_string(),
-            id,
-        });
+fn set_local_metadata(
+    mut commands: Commands,
+    socket: Res<MatchboxSocket<MultipleChannels>>,
+    local_meta_data: Option<Res<LocalMetaData>>,
+) {
+    if local_meta_data.is_none() {
+        if let Some(peer_id) = socket.id() {
+            let peer_id_string = peer_id.0.to_string();
+            let window = window().unwrap();
+
+            let storage = window.session_storage().unwrap().unwrap();
+            const TAB_ID_KEY: &str = "tab_id";
+            let tab_id = if let Ok(Some(value)) = storage.get_item(TAB_ID_KEY) {
+                value
+            } else {
+                info!("{TAB_ID_KEY} not found, setting to {peer_id_string}");
+                storage.set_item(TAB_ID_KEY, &peer_id_string).unwrap();
+                peer_id_string
+            };
+            commands.insert_resource(LocalMetaData { peer_id, tab_id });
+        }
     }
 }
 
+#[derive(Resource, Debug, Serialize, Deserialize, Clone)]
+struct ScreenName(String);
+
+impl Default for ScreenName {
+    fn default() -> Self {
+        Self("Unnamed Player".to_string())
+    }
+}
+
+fn get_cookie_map<T: for<'de> Deserialize<'de>>(key: &str) -> HashMap<String, T> {
+    wasm_cookies::get(key)
+        .map(|map_result| map_result.unwrap())
+        .map(|map| ron::from_str::<HashMap<String, T>>(&map).unwrap())
+        .unwrap_or_default()
+}
+
+fn set_local_property<T>(
+    mut commands: Commands,
+    local_meta_data: Res<LocalMetaData>,
+    property: Option<Res<T>>,
+) where
+    for<'de> T: Deserialize<'de> + Default + Serialize + Debug + Clone + Resource,
+{
+    if property.is_none() {
+        let key = std::any::type_name::<T>();
+        let mut map = get_cookie_map::<T>(key);
+        let value = if let Some(value) = map.get(&local_meta_data.tab_id) {
+            info!("{key} found in cookies: {value:?}");
+            value.clone()
+        } else {
+            let value = map
+                .values()
+                .next()
+                .map(|v| v.to_owned())
+                .unwrap_or_default();
+            info!("{key} not found in cookies, setting to {value:?}");
+            map.insert(local_meta_data.tab_id.clone(), value.clone());
+            wasm_cookies::set(
+                key,
+                &ron::to_string(&map).unwrap(),
+                &CookieOptions::default(),
+            );
+            value
+        };
+        commands.insert_resource(value);
+    }
+}
+
+fn update_local_property<T>(local_meta_data: Res<LocalMetaData>, property: Res<T>)
+where
+    for<'de> T: Deserialize<'de> + Serialize + Clone + Resource,
+{
+    if property.is_changed() {
+        let key = std::any::type_name::<T>();
+        let mut map = get_cookie_map::<T>(key);
+        map.insert(local_meta_data.tab_id.clone(), property.clone());
+        wasm_cookies::set(
+            key,
+            &ron::to_string(&map).unwrap(),
+            &CookieOptions::default(),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn lobby(
     mut commands: Commands,
     mut socket: ResMut<MatchboxSocket<MultipleChannels>>,
@@ -51,28 +151,19 @@ fn lobby(
     mut players: Query<(Entity, &MatchBoxId, &IsLocal, &mut PeerInfo)>,
     mut my_gamesave: ResMut<GameSave>,
     mut gamesaves: Local<HashMap<PeerId, Option<GameSaveData>>>,
-    local_id: Res<LocalPeerId>,
+    local_id: Res<LocalMetaData>,
+    screen_name: Res<ScreenName>,
 ) {
     SidePanel::left("left_panel").show(contexts.ctx_mut(), |ui| {
         let connected_peers_ids = socket.connected_peers().collect::<Vec<_>>();
 
-        let storage = window().unwrap().session_storage().unwrap().unwrap();
-        const KEY: &str = "matchbox_id";
-        let unique_id = if let Ok(Some(value)) = storage.get_item(KEY) {
-            value
-        } else {
-            info!("{KEY} not found, setting to {}", local_id.id_string);
-            storage.set_item(KEY, &local_id.id_string).unwrap();
-            local_id.id_string.clone()
-        };
-
         if players.is_empty() {
             let my_info = PeerInfo {
                 ready: false,
-                name: "Peer A".to_string(),
-                persistent_id: Uuid::parse_str(&unique_id).unwrap(),
+                name: screen_name.0.clone(),
+                tab_id: Uuid::parse_str(&local_id.tab_id).unwrap(),
             };
-            gamesaves.insert(local_id.id, my_gamesave.0.clone());
+            gamesaves.insert(local_id.peer_id, my_gamesave.0.clone());
             // TODO: handle case when 2 peers connect at same time??
             // TODO: store as cookies too in hashmap, then use session storage to store key for latest cookie
             for peer in &connected_peers_ids {
@@ -83,24 +174,22 @@ fn lobby(
                     *peer,
                 );
                 socket.channel(1).send(
-                    bincode::serialize(&P2PMessage::GameSave(
-                        my_gamesave.0.as_ref().map(|g| g.clone()),
-                    ))
-                    .unwrap()
-                    .into_boxed_slice(),
+                    bincode::serialize(&P2PMessage::GameSave(my_gamesave.0.as_ref().cloned()))
+                        .unwrap()
+                        .into_boxed_slice(),
                     *peer,
                 );
             }
             commands.spawn((
-                MatchBoxId(local_id.id),
+                MatchBoxId(local_id.peer_id),
                 IsLocal(true),
                 my_info,
-                PersistentPeerId(unique_id.to_string()),
+                TabId(local_id.tab_id.to_string()),
             ));
             return;
         }
 
-        let local_player_entity = players.iter().filter(|p| p.2 .0).next().unwrap().0;
+        let local_player_entity = players.iter().find(|p| p.2 .0).unwrap().0;
         let my_info = players
             .get_component::<PeerInfo>(local_player_entity)
             .unwrap();
@@ -117,11 +206,9 @@ fn lobby(
                         peer,
                     );
                     socket.channel(1).send(
-                        bincode::serialize(&P2PMessage::GameSave(
-                            my_gamesave.0.as_ref().map(|g| g.clone()),
-                        ))
-                        .unwrap()
-                        .into_boxed_slice(),
+                        bincode::serialize(&P2PMessage::GameSave(my_gamesave.0.as_ref().cloned()))
+                            .unwrap()
+                            .into_boxed_slice(),
                         peer,
                     );
                 }
@@ -152,7 +239,7 @@ fn lobby(
                             commands.spawn((
                                 MatchBoxId(peer_id),
                                 IsLocal(false),
-                                PersistentPeerId(info.persistent_id.to_string()),
+                                TabId(info.tab_id.to_string()),
                                 info,
                             ));
                         }
@@ -271,7 +358,7 @@ fn lobby(
                 (player, entity, info)
             })
             .collect::<Vec<_>>();
-        socket_players.sort_by_key(|(_, _, info)| info.persistent_id);
+        socket_players.sort_by_key(|(_, _, info)| info.tab_id);
         for (i, (player, entity, ..)) in socket_players.into_iter().enumerate() {
             if let PlayerType::Local = player {
                 commands.insert_resource(LocalPlayerHandle(i));

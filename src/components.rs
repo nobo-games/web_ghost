@@ -17,7 +17,7 @@ pub struct MoveDir(pub Vec2Fixed);
 pub struct Position(pub Vec2Fixed);
 
 #[derive(Component, Reflect, Default)]
-pub struct PersistentPeerId(pub String);
+pub struct TabId(pub String);
 
 #[derive(Component)]
 pub struct IsLocal(pub bool);

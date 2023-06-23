@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use bevy::{
     prelude::*,
     render::camera::ScalingMode,
@@ -36,7 +38,7 @@ fn main() {
         .register_rollback_component::<Position>()
         .register_rollback_component::<BulletReady>()
         .register_rollback_component::<MoveDir>()
-        .register_rollback_component::<PersistentPeerId>()
+        .register_rollback_component::<TabId>()
         .register_type_dependency::<bool>()
         .register_type_dependency::<String>()
         .register_type_dependency::<FixedWrapped>()
@@ -112,13 +114,10 @@ fn kill_game_on_disconnect(world: &mut World) {
         return
      };
 
-    if !session.events().any(|e| {
-        if let GGRSEvent::Disconnected { .. } = e {
-            true
-        } else {
-            false
-        }
-    }) {
+    if !session
+        .events()
+        .any(|e| matches!(e, GGRSEvent::Disconnected { .. }))
+    {
         return;
     }
 
@@ -232,7 +231,7 @@ fn insert_player_components(
                 MoveDir(-Vec2Fixed::new(1, 0)),
             ))
             .insert(Position(Vec2Fixed::new(
-                -8.fix() + 2 * player.handle.fix(),
+                (-8).fix() + 2 * player.handle.fix(),
                 0,
             )));
     }
@@ -240,11 +239,8 @@ fn insert_player_components(
 
 fn apply_loaded_components(
     mut commands: Commands,
-    new_players: Query<(Entity, &PersistentPeerId), With<Player>>,
-    loaded_players: Query<
-        (Entity, &PersistentPeerId, &Position, &MoveDir, &BulletReady),
-        Without<Player>,
-    >,
+    new_players: Query<(Entity, &TabId), With<Player>>,
+    loaded_players: Query<(Entity, &TabId, &Position, &MoveDir, &BulletReady), Without<Player>>,
 ) {
     for (new_entity, new_id) in new_players.iter() {
         info!("New player: {:?}", new_id.0);
@@ -255,8 +251,8 @@ fn apply_loaded_components(
             if new_id.0 == loaded_id.0 {
                 info!("Match: {} == {}", new_id.0, loaded_id.0);
                 commands.entity(new_entity).insert((
-                    loaded_transform.clone(),
-                    move_dir.clone(),
+                    *loaded_transform,
+                    *move_dir,
                     BulletReady(bullet_ready.0),
                 ));
                 break;
@@ -308,7 +304,7 @@ fn set_translations_to_positions(mut entities: Query<(&mut Transform, &Position)
 fn bottom_bar_ui(mut contexts: EguiContexts, mut players: Query<(&IsLocal, &mut PeerInfo)>) {
     let PeerInfo {
         name,
-        persistent_id,
+        tab_id: persistent_id,
         ..
     } = &*players.iter_mut().find(|(local, ..)| local.0).unwrap().1;
     TopBottomPanel::bottom("bottom_panel").show(contexts.ctx_mut(), |ui| {
@@ -343,7 +339,7 @@ fn start_matchbox_socket(mut commands: Commands) {
 struct PeerInfo {
     ready: bool,
     name: String,
-    persistent_id: Uuid,
+    tab_id: Uuid,
 }
 
 #[derive(Resource, Default)]
@@ -415,7 +411,7 @@ fn fire_bullets(
             commands
                 .spawn((
                     Bullet,
-                    move_dir.clone(),
+                    *move_dir,
                     SpriteBundle {
                         transform: Transform::from_translation(Vec2::from(pos).extend(200.))
                             .with_rotation(Quat::from_rotation_arc_2d(
