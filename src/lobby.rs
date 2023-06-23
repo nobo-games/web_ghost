@@ -19,7 +19,27 @@ pub struct LobbyPlugin;
 
 impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_system(lobby.run_if(in_state(GameState::Matchmaking)));
+        app.add_systems((
+            get_local_id.run_if(in_state(GameState::Matchmaking)),
+            lobby
+                .run_if(in_state(GameState::Matchmaking))
+                .run_if(resource_exists::<LocalPeerId>()),
+        ));
+    }
+}
+
+#[derive(Resource)]
+struct LocalPeerId {
+    id: PeerId,
+    id_string: String,
+}
+
+fn get_local_id(mut commands: Commands, socket: Res<MatchboxSocket<MultipleChannels>>) {
+    if let Some(id) = socket.id() {
+        commands.insert_resource(LocalPeerId {
+            id_string: id.0.to_string(),
+            id,
+        });
     }
 }
 
@@ -31,26 +51,19 @@ fn lobby(
     mut players: Query<(Entity, &MatchBoxId, &IsLocal, &mut PeerInfo)>,
     mut my_gamesave: ResMut<GameSave>,
     mut gamesaves: Local<HashMap<PeerId, Option<GameSaveData>>>,
+    local_id: Res<LocalPeerId>,
 ) {
     SidePanel::left("left_panel").show(contexts.ctx_mut(), |ui| {
-        if socket.get_channel(0).is_err() {
-            return; // we've already started
-        }
-
         let connected_peers_ids = socket.connected_peers().collect::<Vec<_>>();
-        let Some(id) = socket.id() else {
-            return ;
-        };
 
-        let id_string = id.0.to_string();
         let storage = window().unwrap().session_storage().unwrap().unwrap();
         const KEY: &str = "matchbox_id";
         let unique_id = if let Ok(Some(value)) = storage.get_item(KEY) {
             value
         } else {
-            info!("{KEY} not found, setting to {id_string}");
-            storage.set_item(KEY, &id_string).unwrap();
-            id_string.clone()
+            info!("{KEY} not found, setting to {}", local_id.id_string);
+            storage.set_item(KEY, &local_id.id_string).unwrap();
+            local_id.id_string.clone()
         };
 
         if players.is_empty() {
@@ -59,7 +72,7 @@ fn lobby(
                 name: "Peer A".to_string(),
                 persistent_id: Uuid::parse_str(&unique_id).unwrap(),
             };
-            gamesaves.insert(id, my_gamesave.0.clone());
+            gamesaves.insert(local_id.id, my_gamesave.0.clone());
             // TODO: handle case when 2 peers connect at same time??
             // TODO: store as cookies too in hashmap, then use session storage to store key for latest cookie
             for peer in &connected_peers_ids {
@@ -79,7 +92,7 @@ fn lobby(
                 );
             }
             commands.spawn((
-                MatchBoxId(id),
+                MatchBoxId(local_id.id),
                 IsLocal(true),
                 my_info,
                 PersistentPeerId(unique_id.to_string()),
