@@ -4,7 +4,7 @@ use crate::{
 };
 use bevy::prelude::*;
 use bevy_egui::{
-    egui::{SidePanel, TextEdit, Ui},
+    egui::{Align, Layout, SidePanel, TextEdit, Ui},
     EguiContexts,
 };
 use bevy_ggrs::ggrs::{self, PlayerType};
@@ -32,11 +32,15 @@ impl Plugin for LobbyPlugin {
             set_local_metadata.run_if(in_state(GameState::Matchmaking)),
             lobby
                 .run_if(in_state(GameState::Matchmaking))
-                .after(update_peers),
+                .after(update_peers)
+                .after(check_waiting_on)
+                .after(broadcast_my_info_changes),
             broadcast_my_info_changes
                 .run_if(in_state(GameState::Matchmaking))
-                .after(update_peers),
+                .after(update_peers)
+                .after(ui),
             ui.run_if(in_state(GameState::Matchmaking)),
+            check_waiting_on.run_if(in_state(GameState::Matchmaking)),
         ));
         add_local_property::<UserInfo>(app);
     }
@@ -139,6 +143,7 @@ fn broadcast_my_info_changes(
     my_info: Query<&UserInfo, (With<IsLocal>, Changed<UserInfo>)>,
     my_ready: Query<&IsReady, (With<IsLocal>, Changed<IsReady>)>,
 ) {
+    info!("Broadcasting my_info changes");
     for message in [
         my_info
             .get_single()
@@ -177,6 +182,7 @@ fn maybe_mutate<T: Clone + PartialEq + Debug>(
     f(ui, &mut working_version);
     if working_version != *data.as_ref() {
         **data = working_version;
+        info!("Updated data: {:?}", data.as_ref());
     }
 }
 
@@ -184,6 +190,7 @@ fn ui(
     mut contexts: EguiContexts,
     mut my_info: Query<(&mut UserInfo, &mut IsReady), With<IsLocal>>,
     other_players: Query<(&UserInfo, &IsReady), Without<IsLocal>>,
+    waiting_on: Option<Res<WaitingOn>>,
 ) {
     if my_info.is_empty() {
         return;
@@ -207,7 +214,7 @@ fn ui(
         });
 
         ui.group(|ui| {
-            ui.heading("Players");
+            ui.heading("Other Players");
             ui.separator();
             for (index, (info, ready)) in other_players.iter().enumerate() {
                 ui.horizontal(|ui| {
@@ -216,6 +223,20 @@ fn ui(
                 });
             }
         });
+
+        if let Some(waiting_on) = waiting_on {
+            if !waiting_on.0.is_empty() {
+                ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                    ui.group(|ui| {
+                        for peer_id in waiting_on.0.iter() {
+                            ui.label(format!("{}...", peer_id.0.to_string().get(..8).unwrap()));
+                        }
+                        ui.separator();
+                        ui.label("Waiting on peers to rejoin:");
+                    });
+                });
+            }
+        }
     });
 }
 
@@ -298,6 +319,30 @@ fn receive_from_peers(
     }
 }
 
+#[derive(Resource)]
+struct WaitingOn(Vec<PeerId>);
+
+fn check_waiting_on(
+    mut commands: Commands,
+    socket: Res<MatchboxSocket<MultipleChannels>>,
+    registered_players: Query<&MatchBoxId, With<TabId>>,
+) {
+    if let Some(our_id) = socket.id() {
+        let connected_ids = socket
+            .connected_peers()
+            .chain(std::iter::once(our_id))
+            .collect::<Vec<_>>();
+        let registered_players = registered_players.iter().map(|x| x.0).collect::<Vec<_>>();
+        commands.insert_resource(WaitingOn(
+            connected_ids
+                .iter()
+                .filter(|id| !registered_players.contains(id))
+                .copied()
+                .collect(),
+        ));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lobby(
     mut commands: Commands,
@@ -306,8 +351,14 @@ fn lobby(
     game_saves: Query<(&MatchBoxId, Option<&GameSaveData>)>,
     players: Query<(Entity, &MatchBoxId, &TabId, &IsReady, Option<&GameSaveData>)>,
     my_player: Query<(Entity, &MatchBoxId, &TabId, &IsReady, Option<&GameSaveData>), With<IsLocal>>,
+    waiting_on: Option<Res<WaitingOn>>,
 ) {
-    if players.is_empty() || my_player.is_empty() || !players.iter().all(|(.., ready, _)| ready.0) {
+    if waiting_on.is_none()
+        || !waiting_on.unwrap().0.is_empty()
+        || players.is_empty()
+        || my_player.is_empty()
+        || !players.iter().all(|(.., ready, _)| ready.0)
+    {
         return;
     }
 
@@ -380,6 +431,7 @@ fn lobby(
         if let PlayerType::Local = player {
             commands.insert_resource(LocalPlayerHandle(i));
         }
+        info!("Adding player: {player:?}: handle {i}");
         session_builder = session_builder
             .add_player(player, i)
             .expect("failed to add player");
