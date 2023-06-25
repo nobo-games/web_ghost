@@ -143,7 +143,6 @@ fn broadcast_my_info_changes(
     my_info: Query<&UserInfo, (With<IsLocal>, Changed<UserInfo>)>,
     my_ready: Query<&IsReady, (With<IsLocal>, Changed<IsReady>)>,
 ) {
-    info!("Broadcasting my_info changes");
     for message in [
         my_info
             .get_single()
@@ -153,7 +152,6 @@ fn broadcast_my_info_changes(
     .iter()
     .flatten()
     {
-        info!("Broadcasting user_info: {message:?}");
         for peer_id in socket.connected_peers().collect::<Vec<_>>().iter() {
             socket.send_p2p_message(peer_id, message.clone());
         }
@@ -182,7 +180,7 @@ fn maybe_mutate<T: Clone + PartialEq + Debug>(
     f(ui, &mut working_version);
     if working_version != *data.as_ref() {
         **data = working_version;
-        info!("Updated data: {:?}", data.as_ref());
+        trace!("Updated data: {:?}", data.as_ref());
     }
 }
 
@@ -265,7 +263,6 @@ fn update_peers(
             PeerState::Disconnected => {
                 info!("Peer left: {:?}", peer_id);
                 if let Some((entity, ..)) = players.iter().find(|(.., id)| id.0 == peer_id) {
-                    info!("Despawning entity: {:?}", entity);
                     commands.entity(entity).despawn();
                 }
             }
@@ -288,7 +285,7 @@ fn receive_from_peers(
         {
             if let Ok(p2p_message) = bincode::deserialize::<P2PMessage>(packet) {
                 let mut entity_commands = commands.entity(entity);
-                info!("Received P2PMessage: {:?}", p2p_message);
+                trace!("Received P2PMessage: {:?}", p2p_message);
                 match p2p_message {
                     P2PMessage::TabId(tab_id) => {
                         entity_commands.insert(tab_id);
@@ -431,7 +428,6 @@ fn lobby(
         if let PlayerType::Local = player {
             commands.insert_resource(LocalPlayerHandle(i));
         }
-        info!("Adding player: {player:?}: handle {i}");
         session_builder = session_builder
             .add_player(player, i)
             .expect("failed to add player");

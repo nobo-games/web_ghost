@@ -202,7 +202,6 @@ fn insert_player_components(
     players: Query<(Entity, &Player)>, // This won't find any if loaded from gamestate
 ) {
     for (entity, player) in players.iter() {
-        info!("Inserting player components, entity: {entity:?}");
         commands
             .entity(entity)
             .insert((
@@ -232,13 +231,10 @@ fn apply_loaded_components(
     loaded_players: Query<(Entity, &TabId, &Position, &MoveDir, &BulletReady), Without<Player>>,
 ) {
     for (new_entity, new_id) in new_players.iter() {
-        info!("New player: {:?}", new_id.0);
         for (_loaded_entity, loaded_id, loaded_transform, move_dir, bullet_ready) in
             loaded_players.iter()
         {
-            info!("laoded player: {:?}", loaded_id.0);
             if new_id.0 == loaded_id.0 {
-                info!("Match: {} == {}", new_id.0, loaded_id.0);
                 commands.entity(new_entity).insert((
                     *loaded_transform,
                     *move_dir,
