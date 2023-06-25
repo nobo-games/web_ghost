@@ -1,10 +1,10 @@
 use crate::{
-    components::{IsLocal, MatchBoxId, Player, TabId},
-    GameSave, GameSaveData, GameState, GgrsConfig, LocalPlayerHandle, P2PMessage, PeerInfo,
+    components::{IsLocal, IsReady, MatchBoxId, Player, TabId, UserInfo},
+    GameSaveData, GameState, GgrsConfig, LocalPlayerHandle, P2PMessage,
 };
-use bevy::{prelude::*, utils::Uuid};
+use bevy::prelude::*;
 use bevy_egui::{
-    egui::{SidePanel, TextEdit},
+    egui::{SidePanel, TextEdit, Ui},
     EguiContexts,
 };
 use bevy_ggrs::ggrs::{self, PlayerType};
@@ -13,53 +13,51 @@ use bevy_matchbox::{
     MatchboxSocket,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt::Debug};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt::Debug,
+};
 use wasm_cookies::CookieOptions;
 use web_sys::window;
 
 pub struct LobbyPlugin;
 
-macro_rules! add_local_property {
-    ($app: ident, $t:ty) => {
-        $app.add_system(
-            update_local_property::<$t>
-                .run_if(in_state(GameState::Matchmaking))
-                .run_if(resource_exists::<$t>())
-                .run_if(resource_exists::<LocalMetaData>()),
-        )
-        .add_system(
-            set_local_property::<$t>
-                .run_if(in_state(GameState::Matchmaking))
-                .run_if(resource_exists::<LocalMetaData>()),
-        );
-    };
-}
-
 impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems((
+            update_peers.run_if(in_state(GameState::Matchmaking)),
+            receive_from_peers
+                .run_if(in_state(GameState::Matchmaking))
+                .after(update_peers),
             set_local_metadata.run_if(in_state(GameState::Matchmaking)),
             lobby
                 .run_if(in_state(GameState::Matchmaking))
-                .run_if(resource_exists::<ScreenName>())
-                .run_if(resource_exists::<LocalMetaData>()),
+                .after(update_peers),
+            broadcast_my_info_changes
+                .run_if(in_state(GameState::Matchmaking))
+                .after(update_peers),
+            ui.run_if(in_state(GameState::Matchmaking)),
         ));
-        add_local_property!(app, ScreenName);
+        add_local_property::<UserInfo>(app);
     }
 }
 
-#[derive(Resource)]
-struct LocalMetaData {
-    peer_id: PeerId,
-    tab_id: String,
+fn add_local_property<
+    T: Clone + PartialEq + Debug + Default + Serialize + for<'de> Deserialize<'de> + Component,
+>(
+    app: &mut App,
+) {
+    app.add_system(update_local_property::<T>.run_if(in_state(GameState::Matchmaking)))
+        .add_system(set_local_property::<T>.run_if(in_state(GameState::Matchmaking)));
 }
 
 fn set_local_metadata(
     mut commands: Commands,
     socket: Res<MatchboxSocket<MultipleChannels>>,
-    local_meta_data: Option<Res<LocalMetaData>>,
+    players: Query<With<IsLocal>>,
+    mut stored_gamesave: Option<Res<GameSaveData>>,
 ) {
-    if local_meta_data.is_none() {
+    if players.is_empty() {
         if let Some(peer_id) = socket.id() {
             let peer_id_string = peer_id.0.to_string();
             let window = window().unwrap();
@@ -73,17 +71,12 @@ fn set_local_metadata(
                 storage.set_item(TAB_ID_KEY, &peer_id_string).unwrap();
                 peer_id_string
             };
-            commands.insert_resource(LocalMetaData { peer_id, tab_id });
+            let mut entity_commands =
+                commands.spawn((MatchBoxId(peer_id), IsLocal, TabId(tab_id), IsReady(false)));
+            if let Some(gamesave) = stored_gamesave.take() {
+                entity_commands.insert(gamesave.to_owned());
+            }
         }
-    }
-}
-
-#[derive(Resource, Debug, Serialize, Deserialize, Clone)]
-struct ScreenName(String);
-
-impl Default for ScreenName {
-    fn default() -> Self {
-        Self("Unnamed Player".to_string())
     }
 }
 
@@ -96,15 +89,14 @@ fn get_cookie_map<T: for<'de> Deserialize<'de>>(key: &str) -> HashMap<String, T>
 
 fn set_local_property<T>(
     mut commands: Commands,
-    local_meta_data: Res<LocalMetaData>,
-    property: Option<Res<T>>,
+    entity: Query<(Entity, &TabId), (Without<T>, With<IsLocal>)>,
 ) where
-    for<'de> T: Deserialize<'de> + Default + Serialize + Debug + Clone + Resource,
+    for<'de> T: Deserialize<'de> + Default + Serialize + Debug + Clone + Component,
 {
-    if property.is_none() {
+    if let Some((entity, tab_id)) = entity.iter().next() {
         let key = std::any::type_name::<T>();
         let mut map = get_cookie_map::<T>(key);
-        let value = if let Some(value) = map.get(&local_meta_data.tab_id) {
+        let value = if let Some(value) = map.get(&tab_id.0) {
             info!("{key} found in cookies: {value:?}");
             value.clone()
         } else {
@@ -114,7 +106,7 @@ fn set_local_property<T>(
                 .map(|v| v.to_owned())
                 .unwrap_or_default();
             info!("{key} not found in cookies, setting to {value:?}");
-            map.insert(local_meta_data.tab_id.clone(), value.clone());
+            map.insert(tab_id.0.clone(), value.clone());
             wasm_cookies::set(
                 key,
                 &ron::to_string(&map).unwrap(),
@@ -122,18 +114,18 @@ fn set_local_property<T>(
             );
             value
         };
-        commands.insert_resource(value);
+        commands.entity(entity).insert(value);
     }
 }
 
-fn update_local_property<T>(local_meta_data: Res<LocalMetaData>, property: Res<T>)
+fn update_local_property<T>(property: Query<(&T, &TabId), (Changed<T>, With<IsLocal>)>)
 where
-    for<'de> T: Deserialize<'de> + Serialize + Clone + Resource,
+    for<'de> T: Deserialize<'de> + Serialize + Clone + Component,
 {
-    if property.is_changed() {
+    if let Some((property, tab_id)) = property.iter().next() {
         let key = std::any::type_name::<T>();
         let mut map = get_cookie_map::<T>(key);
-        map.insert(local_meta_data.tab_id.clone(), property.clone());
+        map.insert(tab_id.0.clone(), property.clone());
         wasm_cookies::set(
             key,
             &ron::to_string(&map).unwrap(),
@@ -142,242 +134,266 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn lobby(
+fn broadcast_my_info_changes(
+    mut socket: ResMut<MatchboxSocket<MultipleChannels>>,
+    my_info: Query<&UserInfo, (With<IsLocal>, Changed<UserInfo>)>,
+    my_ready: Query<&IsReady, (With<IsLocal>, Changed<IsReady>)>,
+) {
+    for message in [
+        my_info
+            .get_single()
+            .map(|x| P2PMessage::UserInfo(x.clone())),
+        my_ready.get_single().map(|x| P2PMessage::Ready(x.0)),
+    ]
+    .iter()
+    .flatten()
+    {
+        info!("Broadcasting user_info: {message:?}");
+        for peer_id in socket.connected_peers().collect::<Vec<_>>().iter() {
+            socket.send_p2p_message(peer_id, message.clone());
+        }
+    }
+}
+
+trait SocketExt {
+    fn send_p2p_message(&mut self, peer_id: &PeerId, message: P2PMessage);
+}
+
+impl SocketExt for MatchboxSocket<MultipleChannels> {
+    fn send_p2p_message(&mut self, peer_id: &PeerId, message: P2PMessage) {
+        self.channel(1).send(
+            bincode::serialize(&message).unwrap().into_boxed_slice(),
+            *peer_id,
+        );
+    }
+}
+
+fn maybe_mutate<T: Clone + PartialEq + Debug>(
+    ui: &mut Ui,
+    data: &mut Mut<T>,
+    f: impl FnOnce(&mut Ui, &mut T),
+) {
+    let mut working_version = data.as_ref().clone();
+    f(ui, &mut working_version);
+    if working_version != *data.as_ref() {
+        **data = working_version;
+    }
+}
+
+fn ui(
+    mut contexts: EguiContexts,
+    mut my_info: Query<(&mut UserInfo, &mut IsReady), With<IsLocal>>,
+    other_players: Query<(&UserInfo, &IsReady), Without<IsLocal>>,
+) {
+    if my_info.is_empty() {
+        return;
+    }
+    SidePanel::left("left_panel").show(contexts.ctx_mut(), |ui| {
+        ui.heading("Lobby");
+        ui.separator();
+        let (mut my_info, mut ready) = my_info.single_mut();
+        ui.horizontal(|ui| {
+            ui.label("Name:");
+            maybe_mutate(ui, &mut my_info, |ui, UserInfo { name }| {
+                ui.add(TextEdit::singleline(name).clip_text(false));
+                const MAX_NAME_LENGTH: usize = 20;
+                if name.len() > MAX_NAME_LENGTH {
+                    name.truncate(MAX_NAME_LENGTH);
+                }
+            });
+        });
+        maybe_mutate(ui, &mut ready, |ui, ready| {
+            ui.checkbox(&mut ready.0, "I'm ready");
+        });
+
+        ui.group(|ui| {
+            ui.heading("Players");
+            ui.separator();
+            for (index, (info, ready)) in other_players.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(if ready.0 { "☑" } else { "☐" });
+                    ui.label(format!("{index}: {}", info.name));
+                });
+            }
+        });
+    });
+}
+
+fn update_peers(
     mut commands: Commands,
     mut socket: ResMut<MatchboxSocket<MultipleChannels>>,
-    mut next_state: ResMut<NextState<GameState>>,
-    mut contexts: EguiContexts,
-    mut players: Query<(Entity, &MatchBoxId, &IsLocal, &mut PeerInfo)>,
-    mut my_gamesave: ResMut<GameSave>,
-    mut gamesaves: Local<HashMap<PeerId, Option<GameSaveData>>>,
-    local_id: Res<LocalMetaData>,
-    screen_name: Res<ScreenName>,
+    my_info: Query<(&TabId, &IsReady, &UserInfo, Option<&GameSaveData>), With<IsLocal>>,
+    players: Query<(Entity, &MatchBoxId)>,
 ) {
-    SidePanel::left("left_panel").show(contexts.ctx_mut(), |ui| {
-        let connected_peers_ids = socket.connected_peers().collect::<Vec<_>>();
-
-        if players.is_empty() {
-            let my_info = PeerInfo {
-                ready: false,
-                name: screen_name.0.clone(),
-                tab_id: Uuid::parse_str(&local_id.tab_id).unwrap(),
-            };
-            gamesaves.insert(local_id.peer_id, my_gamesave.0.clone());
-            // TODO: handle case when 2 peers connect at same time??
-            // TODO: store as cookies too in hashmap, then use session storage to store key for latest cookie
-            for peer in &connected_peers_ids {
-                socket.channel(1).send(
-                    bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
-                        .unwrap()
-                        .into_boxed_slice(),
-                    *peer,
+    let Ok((tab_id, ready, user_info, gamesave)) = my_info.get_single() else {
+        return;
+    };
+    for (peer_id, peer_state) in socket.update_peers() {
+        match peer_state {
+            PeerState::Connected => {
+                info!("Peer joined: {:?}", peer_id);
+                commands.spawn((MatchBoxId(peer_id), IsReady(false)));
+                socket.send_p2p_message(&peer_id, P2PMessage::TabId(tab_id.clone()));
+                socket.send_p2p_message(&peer_id, P2PMessage::Ready(ready.0));
+                socket.send_p2p_message(
+                    &peer_id,
+                    P2PMessage::GameSave(gamesave.map(|g| g.to_owned())),
                 );
-                socket.channel(1).send(
-                    bincode::serialize(&P2PMessage::GameSave(my_gamesave.0.as_ref().cloned()))
-                        .unwrap()
-                        .into_boxed_slice(),
-                    *peer,
-                );
+                socket.send_p2p_message(&peer_id, P2PMessage::UserInfo(user_info.clone()));
             }
-            commands.spawn((
-                MatchBoxId(local_id.peer_id),
-                IsLocal(true),
-                my_info,
-                TabId(local_id.tab_id.to_string()),
-            ));
-            return;
-        }
-
-        let local_player_entity = players.iter().find(|p| p.2 .0).unwrap().0;
-        let my_info = players
-            .get_component::<PeerInfo>(local_player_entity)
-            .unwrap();
-
-        // Check for new connections
-        for (peer, state) in socket.update_peers() {
-            match state {
-                PeerState::Connected => {
-                    info!("Peer joined: {:?}", peer);
-                    socket.channel(1).send(
-                        bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
-                            .unwrap()
-                            .into_boxed_slice(),
-                        peer,
-                    );
-                    socket.channel(1).send(
-                        bincode::serialize(&P2PMessage::GameSave(my_gamesave.0.as_ref().cloned()))
-                            .unwrap()
-                            .into_boxed_slice(),
-                        peer,
-                    );
-                }
-                PeerState::Disconnected => {
-                    info!("Peer left: {peer:?}");
+            PeerState::Disconnected => {
+                info!("Peer left: {:?}", peer_id);
+                if let Some((entity, ..)) = players.iter().find(|(.., id)| id.0 == peer_id) {
+                    info!("Despawning entity: {:?}", entity);
+                    commands.entity(entity).despawn();
                 }
             }
         }
+    }
+}
 
-        for (entity, id, local, ..) in players.iter() {
-            if !(local.0 || connected_peers_ids.contains(&id.0)) {
-                commands.entity(entity).despawn();
-            }
-        }
-
-        for (peer_id, packet) in socket.channel(1).receive() {
-            if let Ok(p2p_message) = bincode::deserialize::<P2PMessage>(&packet) {
+fn receive_from_peers(
+    mut commands: Commands,
+    mut socket: ResMut<MatchboxSocket<MultipleChannels>>,
+    players: Query<(Entity, &MatchBoxId)>,
+    mut messages: Local<VecDeque<(PeerId, Box<[u8]>)>>,
+) {
+    messages.extend(socket.channel(1).receive());
+    messages.retain(|(peer_id, packet)| {
+        if let Some(entity) = players
+            .iter()
+            .find(|(_, id)| id.0 == *peer_id)
+            .map(|(entity, ..)| entity)
+        {
+            if let Ok(p2p_message) = bincode::deserialize::<P2PMessage>(packet) {
+                let mut entity_commands = commands.entity(entity);
+                info!("Received P2PMessage: {:?}", p2p_message);
                 match p2p_message {
-                    P2PMessage::PeerInfo(info) => {
-                        let entity = players
-                            .iter()
-                            .filter(|(_, id, ..)| id.0 == peer_id)
-                            .map(|(entity, ..)| entity)
-                            .next();
-                        if let Some(entity) = entity {
-                            commands.entity(entity).insert(info);
-                        } else {
-                            commands.spawn((
-                                MatchBoxId(peer_id),
-                                IsLocal(false),
-                                TabId(info.tab_id.to_string()),
-                                info,
-                            ));
-                        }
+                    P2PMessage::TabId(tab_id) => {
+                        entity_commands.insert(tab_id);
                     }
-                    P2PMessage::GameSave(game_save) => {
-                        gamesaves.insert(peer_id, game_save);
+                    P2PMessage::GameSave(Some(game_save)) => {
+                        entity_commands.insert(game_save);
+                    }
+                    P2PMessage::GameSave(None) => {
+                        entity_commands.remove::<GameSaveData>();
+                    }
+                    P2PMessage::Ready(ready) => {
+                        entity_commands.insert(IsReady(ready));
+                    }
+                    P2PMessage::UserInfo(user_info) => {
+                        entity_commands.insert(user_info);
                     }
                 }
             } else {
                 warn!("Failed to deserialize P2PMessage");
             }
-        }
-
-        let mut my_info = players
-            .get_component_mut::<PeerInfo>(local_player_entity)
-            .unwrap();
-        {
-            let info_before = my_info.clone();
-            ui.checkbox(&mut my_info.ready, "I'm ready");
-            ui.horizontal(|ui| {
-                ui.label("Name:");
-                ui.add(TextEdit::singleline(&mut my_info.name).clip_text(false));
-                if my_info.name.len() > 20 {
-                    my_info.name.truncate(20);
-                }
-            });
-            if *my_info != info_before {
-                for peer_id in connected_peers_ids {
-                    socket.channel(1).send(
-                        bincode::serialize(&P2PMessage::PeerInfo(my_info.clone()))
-                            .unwrap()
-                            .into_boxed_slice(),
-                        peer_id,
-                    );
-                }
-            }
-        }
-
-        ui.group(|ui| {
-            ui.heading("Players");
-            ui.separator();
-            // TODO: filter me out
-            for (index, (.., peer_info)) in players.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(if peer_info.ready { "☑" } else { "☐" });
-                    ui.label(format!("{index}: {}", peer_info.name));
-                });
-            }
-        });
-
-        if !players.iter().all(|(.., info)| info.ready) {
-            return;
-        }
-
-        info!("All peers are ready, starting game");
-
-        // Hopefully this sorting will resolve the same way on all peers
-        my_gamesave.0 = gamesaves
-            .drain()
-            .reduce(|acc, x| match (&acc.1, &x.1) {
-                (Some(acc_save), Some(x_save)) => {
-                    if acc_save.timestamp > x_save.timestamp {
-                        acc
-                    } else if acc_save.timestamp < x_save.timestamp {
-                        x
-                    } else if acc.0 > x.0 {
-                        acc
-                    } else {
-                        x
-                    }
-                }
-                (None, Some(_)) => x,
-                _ => acc,
-            })
-            .unwrap()
-            .1;
-
-        // create a GGRS P2P session
-        let mut session_builder = ggrs::SessionBuilder::<GgrsConfig>::new()
-            .with_num_players(players.iter().len())
-            .with_input_delay(0);
-        let socket_players = if let Some(our_id) = socket.id() {
-            // player order needs to be consistent order across all peers
-            let mut ids: Vec<_> = socket
-                .connected_peers()
-                .chain(std::iter::once(our_id))
-                .collect();
-            ids.sort();
-
-            ids.into_iter()
-                .map(|id| {
-                    if id == our_id {
-                        PlayerType::Local
-                    } else {
-                        PlayerType::Remote(id)
-                    }
-                })
-                .collect::<Vec<_>>()
+            false
         } else {
-            // we're still waiting for the server to initialize our id
-            // no peers should be added at this point anyway
-            vec![PlayerType::Local]
-        };
-
-        let mut socket_players = socket_players
-            .into_iter()
-            .map(|player| {
-                let (entity, .., info) = players
-                    .iter()
-                    .find(|(_, id, local, ..)| match player {
-                        PlayerType::Local => local.0,
-                        PlayerType::Remote(remote_id) => remote_id == id.0,
-                        PlayerType::Spectator(spectator_id) => spectator_id == id.0,
-                    })
-                    .unwrap();
-                (player, entity, info)
-            })
-            .collect::<Vec<_>>();
-        socket_players.sort_by_key(|(_, _, info)| info.tab_id);
-        for (i, (player, entity, ..)) in socket_players.into_iter().enumerate() {
-            if let PlayerType::Local = player {
-                commands.insert_resource(LocalPlayerHandle(i));
-            }
-            session_builder = session_builder
-                .add_player(player, i)
-                .expect("failed to add player");
-            commands.entity(entity).insert(Player { handle: i });
+            true
         }
-
-        // move the channel out of the socket (required because GGRS takes ownership of it)
-        let channel = socket.take_channel(0).unwrap();
-
-        // start the GGRS session
-        let ggrs_session = session_builder
-            .start_p2p_session(channel)
-            .expect("failed to start session");
-
-        commands.insert_resource(bevy_ggrs::Session::P2PSession(ggrs_session));
-        next_state.set(GameState::InGame);
     });
+    while messages.len() > 100 {
+        messages.pop_front();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lobby(
+    mut commands: Commands,
+    mut socket: ResMut<MatchboxSocket<MultipleChannels>>,
+    mut next_state: ResMut<NextState<GameState>>,
+    game_saves: Query<(&MatchBoxId, Option<&GameSaveData>)>,
+    players: Query<(Entity, &MatchBoxId, &TabId, &IsReady, Option<&GameSaveData>)>,
+    my_player: Query<(Entity, &MatchBoxId, &TabId, &IsReady, Option<&GameSaveData>), With<IsLocal>>,
+) {
+    if players.is_empty() || my_player.is_empty() || !players.iter().all(|(.., ready, _)| ready.0) {
+        return;
+    }
+
+    info!("All peers are ready, starting game");
+
+    // Hopefully this sorting will resolve the same way on all peers
+    let (entity, ..) = my_player.single();
+    if let Some(best_save) = game_saves
+        .iter()
+        .filter_map(|(id, gamesave)| gamesave.map(|gamesave| (id.0, gamesave)))
+        .reduce(|acc, x| {
+            if acc.1.timestamp > x.1.timestamp {
+                acc
+            } else if acc.1.timestamp < x.1.timestamp {
+                x
+            } else if acc.0 > x.0 {
+                acc
+            } else {
+                x
+            }
+        })
+        .map(|(_, gamesave)| gamesave)
+    {
+        commands.entity(entity).insert(best_save.clone());
+    }
+
+    // create a GGRS P2P session
+    let mut session_builder = ggrs::SessionBuilder::<GgrsConfig>::new()
+        .with_num_players(players.iter().len())
+        .with_input_delay(0);
+    let socket_players = if let Some(our_id) = socket.id() {
+        // player order needs to be consistent order across all peers
+        let mut ids = socket
+            .connected_peers()
+            .chain(std::iter::once(our_id))
+            .collect::<Vec<_>>();
+        ids.sort();
+
+        ids.into_iter()
+            .map(|id| {
+                if id == our_id {
+                    PlayerType::Local
+                } else {
+                    PlayerType::Remote(id)
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        // we're still waiting for the server to initialize our id
+        // no peers should be added at this point anyway
+        vec![PlayerType::Local]
+    };
+
+    let mut socket_players = socket_players
+        .into_iter()
+        .map(|player| {
+            let (entity, _, info, ..) = players
+                .iter()
+                .find(|(_, id, ..)| match player {
+                    PlayerType::Local => false, // local player is handled separately below
+                    PlayerType::Remote(remote_id) => remote_id == id.0,
+                    PlayerType::Spectator(spectator_id) => spectator_id == id.0,
+                })
+                .unwrap_or_else(|| my_player.single());
+            (player, entity, info)
+        })
+        .collect::<Vec<_>>();
+    socket_players.sort_by_key(|(_, _, tab_id)| &tab_id.0);
+    for (i, (player, entity, ..)) in socket_players.into_iter().enumerate() {
+        if let PlayerType::Local = player {
+            commands.insert_resource(LocalPlayerHandle(i));
+        }
+        session_builder = session_builder
+            .add_player(player, i)
+            .expect("failed to add player");
+        commands.entity(entity).insert(Player { handle: i });
+    }
+
+    // move the channel out of the socket (required because GGRS takes ownership of it)
+    let channel = socket.take_channel(0).unwrap();
+
+    // start the GGRS session
+    let ggrs_session = session_builder
+        .start_p2p_session(channel)
+        .expect("failed to start session");
+
+    commands.insert_resource(bevy_ggrs::Session::P2PSession(ggrs_session));
+    next_state.set(GameState::InGame);
 }

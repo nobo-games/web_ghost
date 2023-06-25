@@ -1,10 +1,6 @@
 #![allow(clippy::type_complexity)]
 
-use bevy::{
-    prelude::*,
-    render::camera::ScalingMode,
-    utils::{HashMap, Uuid},
-};
+use bevy::{prelude::*, render::camera::ScalingMode, utils::HashMap};
 use bevy_asset_loader::prelude::*;
 use bevy_egui::{
     egui::{Align, Layout, TopBottomPanel},
@@ -16,7 +12,7 @@ use bevy_ggrs::{
     GGRSPlugin, GGRSSchedule, PlayerInputs, Rollback, RollbackIdProvider,
 };
 use bevy_matchbox::prelude::*;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use components::*;
 use fixed_point::{Fixed, FixedWrapped, Vec2Fixed};
 use input::*;
@@ -90,21 +86,9 @@ fn main() {
             )
                 .in_schedule(GGRSSchedule),
         )
-        .init_resource::<GameSave>()
         .add_plugin(LobbyPlugin)
         .run();
-
-    // TODO: use this : .run_if(resource_exists::<InputCounter>())
 }
-
-#[derive(Serialize, Deserialize, Clone)]
-struct GameSaveData {
-    snapshot: String,
-    timestamp: DateTime<Utc>,
-}
-
-#[derive(Resource, Default)]
-struct GameSave(Option<GameSaveData>);
 
 fn kill_game_on_disconnect(world: &mut World) {
     let bevy_ggrs::Session::P2PSession(session) = &mut *world
@@ -127,11 +111,11 @@ fn kill_game_on_disconnect(world: &mut World) {
         .unwrap()
         .set(GameState::Matchmaking);
 
-    for (local, mut info) in world.query::<(&IsLocal, &mut PeerInfo)>().iter_mut(world) {
-        if local.0 {
-            info.ready = false;
-            break;
-        }
+    if let Ok(mut ready) = world
+        .query_filtered::<&mut IsReady, With<IsLocal>>()
+        .get_single_mut(world)
+    {
+        ready.0 = false;
     }
 
     let snapshot = world
@@ -139,14 +123,19 @@ fn kill_game_on_disconnect(world: &mut World) {
         .unwrap()
         .get_serialized_snapshot(world);
     info!("Saving world snapshot: {snapshot}");
-    world.get_resource_mut::<GameSave>().unwrap().0 = Some(GameSaveData {
+    world.insert_resource(GameSaveData {
         snapshot,
         timestamp: Utc::now(),
     });
 }
 
 fn load_snapshot(world: &mut World) {
-    if let Some(snapshot) = &world.get_resource_mut::<GameSave>().unwrap().0.take() {
+    if let Some(snapshot) = &world
+        .query_filtered::<Option<&GameSaveData>, With<IsLocal>>()
+        .get_single(world)
+        .expect("no local player found")
+        .cloned()
+    {
         info!(
             "Loading world snapshot from {}: {}",
             snapshot.timestamp, snapshot.snapshot
@@ -301,25 +290,26 @@ fn set_translations_to_positions(mut entities: Query<(&mut Transform, &Position)
     }
 }
 
-fn bottom_bar_ui(mut contexts: EguiContexts, mut players: Query<(&IsLocal, &mut PeerInfo)>) {
-    let PeerInfo {
-        name,
-        tab_id: persistent_id,
-        ..
-    } = &*players.iter_mut().find(|(local, ..)| local.0).unwrap().1;
+fn bottom_bar_ui(
+    mut contexts: EguiContexts,
+    mut players: Query<(&TabId, &UserInfo), With<IsLocal>>,
+) {
+    let (TabId(tab_id), UserInfo { name }) = players.single_mut();
     TopBottomPanel::bottom("bottom_panel").show(contexts.ctx_mut(), |ui| {
         ui.horizontal(|ui| {
             ui.label(format!("Name: {name}"));
             ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
-                ui.label(format!("ID: {persistent_id}"));
+                ui.label(format!("ID: {tab_id}"));
             });
         });
     });
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 enum P2PMessage {
-    PeerInfo(PeerInfo),
+    TabId(TabId),
+    Ready(bool),
+    UserInfo(UserInfo),
     GameSave(Option<GameSaveData>),
 }
 
@@ -335,11 +325,12 @@ fn start_matchbox_socket(mut commands: Commands) {
     ));
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug, Component)]
-struct PeerInfo {
-    ready: bool,
-    name: String,
-    tab_id: Uuid,
+impl Default for UserInfo {
+    fn default() -> Self {
+        Self {
+            name: "New User".to_string(),
+        }
+    }
 }
 
 #[derive(Resource, Default)]
