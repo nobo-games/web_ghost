@@ -27,10 +27,10 @@ impl Plugin for LobbyPlugin {
             set_local_metadata.run_if(in_state(GameState::Matchmaking)),
             trigger_game_start.run_if(in_state(GameState::Matchmaking)),
             find_best_game_save
-                .run_if(in_state(GameState::Matchmaking))
+                .in_schedule(OnExit(GameState::Matchmaking))
                 .after(trigger_game_start),
-            lobby
-                .run_if(in_state(GameState::Matchmaking))
+            launch_session
+                .in_schedule(OnExit(GameState::Matchmaking))
                 .after(update_peers)
                 .after(check_waiting_on)
                 .after(broadcast_my_info_changes)
@@ -41,8 +41,7 @@ impl Plugin for LobbyPlugin {
                 .after(ui),
             ui.run_if(in_state(GameState::Matchmaking)),
             check_waiting_on.run_if(in_state(GameState::Matchmaking)),
-        ))
-        .add_event::<GameStartTrigger>();
+        ));
         add_local_property::<UserInfo>(app);
     }
 }
@@ -344,40 +343,33 @@ fn check_waiting_on(
     }
 }
 
-struct GameStartTrigger;
-
 fn trigger_game_start(
-    mut game_start: EventWriter<GameStartTrigger>,
     ready_statuses: Query<&IsReady>,
-    all_players: Query<(Entity, &MatchBoxPeerId)>,
-    local_player: Query<(Entity, &MatchBoxPeerId), With<IsLocal>>,
+    local_player: Query<With<IsLocal>>,
     waiting_on: Option<Res<WaitingOn>>,
+    mut next_state: ResMut<NextState<GameState>>,
 ) {
     if waiting_on.is_some()
         && waiting_on.unwrap().0.is_empty()
-        && !all_players.is_empty()
         && !local_player.is_empty()
         && ready_statuses.iter().all(|ready| ready.0)
     {
         info!("All peers are ready, starting game");
-        game_start.send(GameStartTrigger);
+        next_state.set(GameState::InGame);
     }
 }
 
 fn find_best_game_save(
     mut commands: Commands,
     game_saves: Query<(&MatchBoxPeerId, Option<&GameSaveData>)>,
-    mut game_start: EventReader<GameStartTrigger>,
     local_player: Query<Entity, With<IsLocal>>,
 ) {
-    if game_start.iter().next().is_none() {
-        return;
-    }
-    // Hopefully this sorting will resolve the same way on all peers
+    // This sorting will resolve the same way on all peers
     if let Some(best_save) = game_saves
         .iter()
         .filter_map(|(id, gamesave)| gamesave.map(|gamesave| (id.0, gamesave)))
         .reduce(|acc, x| {
+            // Prefer the most recent save, then the one from the peer with the highest peer id
             if acc.1.timestamp > x.1.timestamp {
                 acc
             } else if acc.1.timestamp < x.1.timestamp {
@@ -396,18 +388,12 @@ fn find_best_game_save(
     }
 }
 
-fn lobby(
+fn launch_session(
     mut commands: Commands,
     mut socket: ResMut<MatchboxSocket<MultipleChannels>>,
-    mut next_state: ResMut<NextState<GameState>>,
     all_players: Query<(Entity, &MatchBoxPeerId)>,
     local_player: Query<&MatchBoxPeerId, With<IsLocal>>,
-    mut game_start: EventReader<GameStartTrigger>,
 ) {
-    if game_start.iter().next().is_none() {
-        return;
-    }
-
     let mut session_builder = ggrs::SessionBuilder::<GgrsConfig>::new()
         .with_num_players(all_players.iter().len())
         .with_input_delay(0);
@@ -437,14 +423,10 @@ fn lobby(
         commands.entity(entity).insert(Player { handle: i });
     }
 
-    // move the channel out of the socket (required because GGRS takes ownership of it)
+    // Move the channel out of the socket (required because GGRS takes ownership of it)
     let channel = socket.take_channel(0).unwrap();
-
-    // start the GGRS session
     let ggrs_session = session_builder
         .start_p2p_session(channel)
         .expect("failed to start session");
-
     commands.insert_resource(bevy_ggrs::Session::P2PSession(ggrs_session));
-    next_state.set(GameState::InGame);
 }
