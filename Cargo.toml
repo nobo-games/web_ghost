@@ -28,7 +28,7 @@ ron = "0.8"
 bevy_matchbox = { git = "https://github.com/samcarey/matchbox.git", rev = "823aa327247ce1f83b97dd51f951d941eea4a873" }
 
 # bevy_ggrs = { path = "../third_party/bevy_ggrs" }
-bevy_ggrs = { git = "https://github.com/nobo-games/bevy_ggrs.git", rev = "3a5c7a81953bce19e1bae810c47be4a8c76eb512" }
+bevy_ggrs = { git = "https://github.com/nobo-games/bevy_ggrs.git", rev = "05966434b905164137e5b0f118278395234dcf2e" }
 
 
 # Recommended for rapier: https://rapier.rs/docs/user_guides/bevy_plugin/common_mistakes

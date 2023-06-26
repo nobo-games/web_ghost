@@ -888,7 +888,7 @@ dependencies = [
 [[package]]
 name = "bevy_ggrs"
 version = "0.12.0"
-source = "git+https://github.com/nobo-games/bevy_ggrs.git?rev=3a5c7a81953bce19e1bae810c47be4a8c76eb512#3a5c7a81953bce19e1bae810c47be4a8c76eb512"
+source = "git+https://github.com/nobo-games/bevy_ggrs.git?rev=05966434b905164137e5b0f118278395234dcf2e#05966434b905164137e5b0f118278395234dcf2e"
 dependencies = [
  "bevy",
  "bytemuck",
