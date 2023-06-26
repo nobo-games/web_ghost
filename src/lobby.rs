@@ -1,6 +1,6 @@
 use crate::{
     components::{IsLocal, IsReady, MatchBoxId, Player, TabId, UserInfo},
-    GameSaveData, GameState, GgrsConfig, LocalPlayerHandle, P2PMessage,
+    kill_game, GameSaveData, GameState, GgrsConfig, LocalPlayerHandle, Messages, P2PMessage,
 };
 use bevy::prelude::*;
 use bevy_egui::{
@@ -13,10 +13,7 @@ use bevy_matchbox::{
     MatchboxSocket,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, VecDeque},
-    fmt::Debug,
-};
+use std::{collections::HashMap, fmt::Debug};
 use wasm_cookies::CookieOptions;
 use web_sys::window;
 
@@ -26,9 +23,7 @@ impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems((
             update_peers.run_if(in_state(GameState::Matchmaking)),
-            receive_from_peers
-                .run_if(in_state(GameState::Matchmaking))
-                .after(update_peers),
+            receive_from_peers.after(update_peers).after(kill_game),
             set_local_metadata.run_if(in_state(GameState::Matchmaking)),
             lobby
                 .run_if(in_state(GameState::Matchmaking))
@@ -272,12 +267,10 @@ fn update_peers(
 
 fn receive_from_peers(
     mut commands: Commands,
-    mut socket: ResMut<MatchboxSocket<MultipleChannels>>,
     players: Query<(Entity, &MatchBoxId)>,
-    mut messages: Local<VecDeque<(PeerId, Box<[u8]>)>>,
+    mut messages: ResMut<Messages>,
 ) {
-    messages.extend(socket.channel(1).receive());
-    messages.retain(|(peer_id, packet)| {
+    messages.0.retain(|(peer_id, packet)| {
         if let Some(entity) = players
             .iter()
             .find(|(_, id)| id.0 == *peer_id)
@@ -311,9 +304,6 @@ fn receive_from_peers(
             true
         }
     });
-    while messages.len() > 100 {
-        messages.pop_front();
-    }
 }
 
 #[derive(Resource)]

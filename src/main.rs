@@ -1,5 +1,7 @@
 #![allow(clippy::type_complexity)]
 
+use std::collections::VecDeque;
+
 use bevy::{prelude::*, render::camera::ScalingMode, utils::HashMap};
 use bevy_asset_loader::prelude::*;
 use bevy_egui::{
@@ -71,7 +73,7 @@ fn main() {
                 .after(load_snapshot),
             camera_follow.run_if(in_state(GameState::InGame)),
             cleanup_session.in_schedule(OnExit(GameState::InGame)),
-            kill_game_on_disconnect.run_if(in_state(GameState::InGame)),
+            kill_game.run_if(in_state(GameState::InGame)),
         ))
         .add_systems(
             (
@@ -87,10 +89,24 @@ fn main() {
                 .in_schedule(GGRSSchedule),
         )
         .add_plugin(LobbyPlugin)
+        .init_resource::<Messages>()
+        .add_system(read_messages.before(kill_game))
         .run();
 }
 
-fn kill_game_on_disconnect(world: &mut World) {
+fn read_messages(
+    mut messages: ResMut<Messages>,
+    mut socket: Option<ResMut<MatchboxSocket<MultipleChannels>>>,
+) {
+    if let Some(socket) = socket.as_mut() {
+        messages.0.extend(socket.channel(1).receive());
+    }
+}
+
+#[derive(Resource, Default)]
+struct Messages(VecDeque<(PeerId, Box<[u8]>)>);
+
+fn kill_game(world: &mut World) {
     let bevy_ggrs::Session::P2PSession(session) = &mut *world
         .get_resource_mut::<bevy_ggrs::Session<GgrsConfig>>()
         .unwrap()
@@ -101,6 +117,7 @@ fn kill_game_on_disconnect(world: &mut World) {
     if !session
         .events()
         .any(|e| matches!(e, GGRSEvent::Disconnected { .. }))
+        && world.get_resource::<Messages>().unwrap().0.is_empty()
     {
         return;
     }
