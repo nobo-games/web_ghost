@@ -12,6 +12,9 @@ pub struct Player {
 #[derive(Component, Reflect, Default)]
 pub struct Bullet;
 
+#[derive(Component, Reflect, Default)]
+pub struct Character;
+
 #[derive(Component, Reflect, Default, Clone, Copy)]
 pub struct MoveDir(pub Vec2Fixed);
 
@@ -23,8 +26,8 @@ pub struct TabId(pub String);
 
 #[derive(Component)]
 pub struct IsLocal;
-#[derive(Component)]
-pub struct MatchBoxId(pub PeerId);
+#[derive(Component, Debug)]
+pub struct MatchBoxPeerId(pub PeerId);
 
 #[derive(Component, Default, Clone, PartialEq, Debug)]
 pub struct IsReady(pub bool);
