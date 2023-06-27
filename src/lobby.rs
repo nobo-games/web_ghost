@@ -21,27 +21,29 @@ pub struct LobbyPlugin;
 
 impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems((
-            update_peers.run_if(in_state(GameState::Matchmaking)),
-            receive_from_peers.after(update_peers).after(kill_game),
-            set_local_metadata.run_if(in_state(GameState::Matchmaking)),
-            trigger_game_start.run_if(in_state(GameState::Matchmaking)),
-            find_best_game_save
-                .in_schedule(OnExit(GameState::Matchmaking))
-                .after(trigger_game_start),
-            launch_session
-                .in_schedule(OnExit(GameState::Matchmaking))
-                .after(update_peers)
-                .after(check_waiting_on)
-                .after(broadcast_my_info_changes)
-                .after(trigger_game_start),
-            broadcast_my_info_changes
-                .run_if(in_state(GameState::Matchmaking))
-                .after(update_peers)
-                .after(ui),
-            ui.run_if(in_state(GameState::Matchmaking)),
-            check_waiting_on.run_if(in_state(GameState::Matchmaking)),
-        ));
+        app.add_system(receive_from_peers.after(update_peers).after(kill_game))
+            .add_systems(
+                (
+                    update_peers,
+                    set_local_metadata,
+                    trigger_game_start,
+                    ui,
+                    check_waiting_on,
+                    broadcast_my_info_changes.after(update_peers).after(ui),
+                )
+                    .in_set(OnUpdate(GameState::Matchmaking)),
+            )
+            .add_systems(
+                (
+                    find_best_game_save.after(trigger_game_start),
+                    launch_session
+                        .after(update_peers)
+                        .after(check_waiting_on)
+                        .after(broadcast_my_info_changes)
+                        .after(trigger_game_start),
+                )
+                    .in_schedule(OnExit(GameState::Matchmaking)),
+            );
         add_local_property::<UserInfo>(app);
     }
 }
