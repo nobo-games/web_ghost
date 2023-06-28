@@ -5418,7 +5418,6 @@ dependencies = [
  "chrono",
  "fixed",
  "fixed-sqrt",
- "indexmap",
  "ron",
  "serde",
  "wasm-cookies",
