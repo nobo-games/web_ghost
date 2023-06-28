@@ -1,7 +1,6 @@
 #![allow(clippy::type_complexity)]
 
-use std::collections::VecDeque;
-
+use crate::fixed_point::Fix;
 use bevy::{prelude::*, render::camera::ScalingMode, utils::HashMap};
 use bevy_asset_loader::prelude::*;
 use bevy_egui::{
@@ -20,8 +19,7 @@ use fixed_point::{Fixed, FixedWrapped, Vec2Fixed};
 use input::*;
 use lobby::LobbyPlugin;
 use serde::{Deserialize, Serialize};
-
-use crate::fixed_point::Fix;
+use std::collections::VecDeque;
 
 mod components;
 mod fixed_point;
@@ -216,27 +214,25 @@ fn insert_player_components(
     mut rip: ResMut<RollbackIdProvider>,
     players: Query<(Entity, &Player)>, // This won't find any if loaded from gamestate
 ) {
+    let radius_fixed = 5.fix() / 10;
+    let width = (radius_fixed * 2).to_num();
     for (entity, player) in players.iter() {
-        commands
-            .entity(entity)
-            .insert((
-                Rollback::new(rip.next_id()),
-                SpriteBundle {
-                    transform: Transform::from_translation(Vec3::new(0., 0., 100.)),
-                    sprite: Sprite {
-                        color: Color::rgb(0., 0.47, 1.),
-                        custom_size: Some(Vec2::new(1., 1.)),
-                        ..default()
-                    },
+        commands.entity(entity).insert((
+            Rollback::new(rip.next_id()),
+            SpriteBundle {
+                transform: Transform::from_translation(Vec3::new(0., 0., 100.)),
+                sprite: Sprite {
+                    color: Color::rgb(0., 0.47, 1.),
+                    custom_size: Some(Vec2::new(width, width)),
                     ..default()
                 },
-                BulletReady(true),
-                MoveDir(-Vec2Fixed::new(1, 0)),
-            ))
-            .insert(Position(Vec2Fixed::new(
-                (-8).fix() + 2 * player.handle.fix(),
-                0,
-            )));
+                ..default()
+            },
+            BulletReady(true),
+            MoveDir(-Vec2Fixed::new(1, 0)),
+            Position(Vec2Fixed::new((-8).fix() + 2 * player.handle.fix(), 0)),
+            Radius(radius_fixed),
+        ));
     }
 }
 
@@ -402,34 +398,37 @@ fn fire_bullets(
     mut commands: Commands,
     inputs: Res<PlayerInputs<GgrsConfig>>,
     images: Res<ImageAssets>,
-    mut player_query: Query<(&Position, &Player, &mut BulletReady, &MoveDir)>,
+    mut player_query: Query<(&Position, &Player, &mut BulletReady, &MoveDir, &Radius)>,
     mut rip: ResMut<RollbackIdProvider>,
 ) {
-    for (transform, player, mut bullet_ready, move_dir) in player_query.iter_mut() {
+    let bullet_radius = 5.fix() / 100;
+    let bullet_width = (bullet_radius * 2).to_num();
+    for (player_transform, player, mut bullet_ready, player_move_dir, player_radius) in
+        player_query.iter_mut()
+    {
         let (input, _) = inputs[player.handle];
         if fire(input) && bullet_ready.0 {
-            let player_pos = transform.0;
-            let pos = player_pos + (move_dir.0) * Fixed::from_num(PLAYER_RADIUS + BULLET_RADIUS);
-            commands
-                .spawn((
-                    Bullet,
-                    *move_dir,
-                    SpriteBundle {
-                        transform: Transform::from_translation(Vec2::from(pos).extend(200.))
-                            .with_rotation(Quat::from_rotation_arc_2d(
-                                Vec2::X,
-                                Vec2::from(move_dir.0),
-                            )),
-                        texture: images.bullet.clone(),
-                        sprite: Sprite {
-                            custom_size: Some(Vec2::new(0.3, 0.1)),
-                            ..default()
-                        },
+            let pos = player_transform.0 + player_move_dir.0 * (bullet_radius + player_radius.0);
+            commands.spawn((
+                Bullet,
+                *player_move_dir,
+                SpriteBundle {
+                    transform: Transform::from_translation(Vec2::from(pos).extend(200.))
+                        .with_rotation(Quat::from_rotation_arc_2d(
+                            Vec2::X,
+                            Vec2::from(player_move_dir.0),
+                        )),
+                    texture: images.bullet.clone(),
+                    sprite: Sprite {
+                        custom_size: Some(Vec2::new(bullet_width * 3., bullet_width)),
                         ..default()
                     },
-                    Rollback::new(rip.next_id()),
-                ))
-                .insert(Position(pos));
+                    ..default()
+                },
+                Rollback::new(rip.next_id()),
+                Position(pos),
+                Radius(bullet_radius),
+            ));
             bullet_ready.0 = false;
         }
     }
@@ -456,18 +455,15 @@ fn reload_bullet(
     }
 }
 
-const PLAYER_RADIUS: f32 = 0.5;
-const BULLET_RADIUS: f32 = 0.025;
-
 fn kill_players(
     mut commands: Commands,
-    player_query: Query<(Entity, &Position), (With<Player>, Without<Bullet>)>,
-    bullet_query: Query<&Position, With<Bullet>>,
+    player_query: Query<(Entity, &Position, &Radius), (With<Player>, Without<Bullet>)>,
+    bullet_query: Query<(&Position, &Radius), With<Bullet>>,
 ) {
-    for (player, player_transform) in player_query.iter() {
-        for bullet_transform in bullet_query.iter() {
+    for (player, player_transform, player_radius) in player_query.iter() {
+        for (bullet_transform, bullet_radius) in bullet_query.iter() {
             let distance = (player_transform.0 - bullet_transform.0).norm();
-            if distance < PLAYER_RADIUS + BULLET_RADIUS {
+            if distance < player_radius.0 + bullet_radius.0 {
                 commands.entity(player).remove::<SpriteBundle>();
             }
         }

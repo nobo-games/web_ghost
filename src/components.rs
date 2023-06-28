@@ -1,4 +1,4 @@
-use crate::fixed_point::Vec2Fixed;
+use crate::fixed_point::{Fixed, Vec2Fixed};
 use bevy::prelude::*;
 use bevy_matchbox::prelude::PeerId;
 use chrono::{DateTime, Utc};
@@ -42,3 +42,6 @@ pub struct GameSaveData {
     pub snapshot: String,
     pub timestamp: DateTime<Utc>,
 }
+
+#[derive(Component)]
+pub struct Radius(pub Fixed);
