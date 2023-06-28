@@ -61,20 +61,18 @@ fn main() {
         .insert_resource(ClearColor(Color::rgb(0.53, 0.53, 0.53)))
         .add_system(setup.in_schedule(OnExit(GameState::AssetLoading)))
         .add_system(start_matchbox_socket.in_schedule(OnEnter(GameState::Matchmaking)))
-        .add_systems((
-            bottom_bar_ui.run_if(in_state(GameState::InGame)),
-            insert_player_components.in_schedule(OnEnter(GameState::InGame)),
-            load_snapshot
-                .in_schedule(OnEnter(GameState::InGame))
-                .after(insert_player_components),
-            apply_loaded_components
-                .in_schedule(OnEnter(GameState::InGame))
-                .after(insert_player_components)
-                .after(load_snapshot),
-            camera_follow.run_if(in_state(GameState::InGame)),
-            cleanup_session.in_schedule(OnExit(GameState::InGame)),
-            kill_game.run_if(in_state(GameState::InGame)),
-        ))
+        .add_systems(
+            (
+                insert_player_components,
+                load_snapshot.after(insert_player_components),
+                apply_loaded_components
+                    .after(insert_player_components)
+                    .after(load_snapshot),
+            )
+                .in_schedule(OnEnter(GameState::InGame)),
+        )
+        .add_system(cleanup_session.in_schedule(OnExit(GameState::InGame)))
+        .add_systems((bottom_bar_ui, camera_follow, kill_game).in_set(OnUpdate(GameState::InGame)))
         .add_systems(
             (
                 move_players,
