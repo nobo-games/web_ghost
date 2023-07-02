@@ -39,9 +39,8 @@ fn main() {
         .register_rollback_component::<TabId>()
         .register_type_dependency::<bool>()
         .register_type_dependency::<String>()
-        // .register_type_dependency::<FixedWrapped>()
-        // .register_type_dependency::<Vec2Fixed>()
         .register_type_dependency::<IVec2>()
+        .register_type_dependency::<i32>()
         .build(&mut app);
 
     app.add_state::<GameState>()
