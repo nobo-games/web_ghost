@@ -1,4 +1,4 @@
-use crate::fixed_point::{Fixed, Vec2Fixed};
+// use crate::fixed_point::{Fixed, Vec2Fixed};
 use bevy::prelude::*;
 use bevy_matchbox::prelude::PeerId;
 use chrono::{DateTime, Utc};
@@ -16,10 +16,10 @@ pub struct Bullet;
 pub struct Character;
 
 #[derive(Component, Reflect, Default, Clone, Copy)]
-pub struct MoveDir(pub Vec2Fixed);
+pub struct MoveDir(pub IVec2);
 
-#[derive(Component, Reflect, Default, Clone, Copy)]
-pub struct Position(pub Vec2Fixed);
+#[derive(Component, Reflect, Default, Clone, Copy, Debug)]
+pub struct Position(pub IVec2);
 
 #[derive(Component, Reflect, Default, Serialize, Deserialize, Clone, Debug)]
 pub struct TabId(pub String);
@@ -44,4 +44,4 @@ pub struct GameSaveData {
 }
 
 #[derive(Component)]
-pub struct Radius(pub Fixed);
+pub struct Radius(pub i32);

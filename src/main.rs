@@ -1,6 +1,6 @@
 #![allow(clippy::type_complexity)]
 
-use crate::fixed_point::Fix;
+// use crate::fixed_point::Fix;
 use bevy::{prelude::*, render::camera::ScalingMode, utils::HashMap};
 use bevy_asset_loader::prelude::*;
 use bevy_egui::{
@@ -15,16 +15,18 @@ use bevy_ggrs::{
 use bevy_matchbox::prelude::*;
 use chrono::Utc;
 use components::*;
-use fixed_point::{Fixed, FixedWrapped, Vec2Fixed};
+// use fixed_point::{FixedWrapped, Vec2Fixed};
 use input::*;
 use lobby::LobbyPlugin;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 mod components;
-mod fixed_point;
 mod input;
 mod lobby;
+
+const F2I: i32 = 2_i32.pow(12);
+const I2F: f32 = 1.0 / F2I as f32;
 
 fn main() {
     let mut app = App::new();
@@ -37,8 +39,9 @@ fn main() {
         .register_rollback_component::<TabId>()
         .register_type_dependency::<bool>()
         .register_type_dependency::<String>()
-        .register_type_dependency::<FixedWrapped>()
-        .register_type_dependency::<Vec2Fixed>()
+        // .register_type_dependency::<FixedWrapped>()
+        // .register_type_dependency::<Vec2Fixed>()
+        .register_type_dependency::<IVec2>()
         .build(&mut app);
 
     app.add_state::<GameState>()
@@ -166,8 +169,9 @@ fn cleanup_session(mut commands: Commands, rollback_entities: Query<Entity, With
     }
 }
 
-const MAP_SIZE: u32 = 41;
-const GRID_WIDTH: f32 = 0.05;
+const MAP_SIZE_RI: i32 = 41;
+const MAP_SIZE_SI: i32 = 41 * F2I;
+const GRID_WIDTH_RF: f32 = 0.05;
 
 fn setup(mut commands: Commands) {
     let mut camera_bundle = Camera2dBundle::default();
@@ -175,16 +179,16 @@ fn setup(mut commands: Commands) {
     commands.spawn(camera_bundle);
 
     // Horizontal lines
-    for i in 0..=MAP_SIZE {
+    for i in 0..=MAP_SIZE_RI {
         commands.spawn(SpriteBundle {
             transform: Transform::from_translation(Vec3::new(
                 0.,
-                i as f32 - MAP_SIZE as f32 / 2.,
+                i as f32 - MAP_SIZE_RI as f32 / 2.,
                 0.,
             )),
             sprite: Sprite {
                 color: Color::rgb(0.27, 0.27, 0.27),
-                custom_size: Some(Vec2::new(MAP_SIZE as f32, GRID_WIDTH)),
+                custom_size: Some(Vec2::new(MAP_SIZE_RI as f32, GRID_WIDTH_RF)),
                 ..default()
             },
             ..default()
@@ -192,16 +196,16 @@ fn setup(mut commands: Commands) {
     }
 
     // Vertical lines
-    for i in 0..=MAP_SIZE {
+    for i in 0..=MAP_SIZE_RI {
         commands.spawn(SpriteBundle {
             transform: Transform::from_translation(Vec3::new(
-                i as f32 - MAP_SIZE as f32 / 2.,
+                i as f32 - MAP_SIZE_RI as f32 / 2.,
                 0.,
                 0.,
             )),
             sprite: Sprite {
                 color: Color::rgb(0.27, 0.27, 0.27),
-                custom_size: Some(Vec2::new(GRID_WIDTH, MAP_SIZE as f32)),
+                custom_size: Some(Vec2::new(GRID_WIDTH_RF, MAP_SIZE_RI as f32)),
                 ..default()
             },
             ..default()
@@ -209,13 +213,14 @@ fn setup(mut commands: Commands) {
     }
 }
 
+const PLAYER_RADIUS_SI: i32 = 5 * F2I / 10;
+const PLAYER_WIDTH_RF: f32 = PLAYER_RADIUS_SI as f32 * I2F * 2.;
+
 fn insert_player_components(
     mut commands: Commands,
     mut rip: ResMut<RollbackIdProvider>,
     players: Query<(Entity, &Player)>, // This won't find any if loaded from gamestate
 ) {
-    let radius_fixed = 5.fix() / 10;
-    let width = (radius_fixed * 2).to_num();
     for (entity, player) in players.iter() {
         commands.entity(entity).insert((
             Rollback::new(rip.next_id()),
@@ -223,15 +228,15 @@ fn insert_player_components(
                 transform: Transform::from_translation(Vec3::new(0., 0., 100.)),
                 sprite: Sprite {
                     color: Color::rgb(0., 0.47, 1.),
-                    custom_size: Some(Vec2::new(width, width)),
+                    custom_size: Some(Vec2::new(PLAYER_WIDTH_RF, PLAYER_WIDTH_RF)),
                     ..default()
                 },
                 ..default()
             },
             BulletReady(true),
-            MoveDir(-Vec2Fixed::new(1, 0)),
-            Position(Vec2Fixed::new((-8).fix() + 2 * player.handle.fix(), 0)),
-            Radius(radius_fixed),
+            MoveDir(-IVec2::new(1, 0) * DIRECTION_SCALE),
+            Position(IVec2::new((-8 + 2 * player.handle as i32) * F2I, 0)),
+            Radius(PLAYER_RADIUS_SI),
         ));
     }
 }
@@ -260,6 +265,8 @@ fn apply_loaded_components(
     }
 }
 
+const PLAYER_MOVE_SPEED_SI: i32 = (13 * F2I) / 100;
+
 fn move_players(
     inputs: Res<PlayerInputs<GgrsConfig>>,
     mut player_query: Query<(&mut Position, &mut MoveDir, &Player)>,
@@ -268,20 +275,15 @@ fn move_players(
         let (input, _) = inputs[player.handle];
         let direction = direction(input);
 
-        if direction == Vec2Fixed::new(0, 0) {
+        if direction == IVec2::ZERO {
             continue;
         }
         move_dir.0 = direction;
-
-        let move_speed = 13.fix() / 100;
-        let move_delta = direction * move_speed;
+        let move_delta = (direction * PLAYER_MOVE_SPEED_SI) / DIRECTION_SCALE;
 
         let old_pos = position.0;
-        let width = (MAP_SIZE.fix() + 1.fix()) / 2;
-        let limit = Vec2Fixed {
-            x: FixedWrapped(width),
-            y: FixedWrapped(width),
-        };
+        let width = (MAP_SIZE_SI + 1) / 2;
+        let limit = IVec2::splat(width);
 
         let new_pos = (old_pos + move_delta).clamp(-limit, limit);
 
@@ -292,8 +294,8 @@ fn move_players(
 
 fn set_translations_to_positions(mut entities: Query<(&mut Transform, &Position)>) {
     for (mut transform, position) in entities.iter_mut() {
-        transform.translation.x = position.0.x.0.to_num();
-        transform.translation.y = position.0.y.0.to_num();
+        transform.translation.x = position.0.x as f32 * I2F;
+        transform.translation.y = position.0.y as f32 * I2F;
     }
 }
 
@@ -394,6 +396,44 @@ enum GameState {
     InGame,
 }
 
+const BULLET_RADIUS_SI: i32 = 5 * F2I / 100;
+
+pub trait IVec2Ext {
+    fn i2f(self) -> Vec2;
+    fn norm_sq(self) -> Option<i32>;
+    fn norm(self) -> Option<i32>;
+    fn normalize_or_zero(self) -> Self;
+    fn normalize_or_zero_at_scale(self, scale: i32) -> Self;
+}
+
+impl IVec2Ext for IVec2 {
+    fn i2f(self) -> Vec2 {
+        Vec2::new(self.x as f32 * I2F, self.y as f32 * I2F)
+    }
+    fn norm_sq(self) -> Option<i32> {
+        self.x
+            .checked_mul(self.x)?
+            .checked_add(self.y.checked_mul(self.y)?)
+    }
+    fn norm(self) -> Option<i32> {
+        use num_integer::Roots;
+        self.norm_sq().map(|sq| sq.sqrt())
+    }
+    fn normalize_or_zero(self) -> Self {
+        self.normalize_or_zero_at_scale(1)
+    }
+
+    fn normalize_or_zero_at_scale(self, scale: i32) -> Self {
+        if self == Self::ZERO {
+            self
+        } else {
+            let scaled = self * scale;
+            let scaled_norm = self.norm().unwrap();
+            Self::new(scaled.x / scaled_norm, scaled.y / scaled_norm)
+        }
+    }
+}
+
 fn fire_bullets(
     mut commands: Commands,
     inputs: Res<PlayerInputs<GgrsConfig>>,
@@ -401,33 +441,31 @@ fn fire_bullets(
     mut player_query: Query<(&Position, &Player, &mut BulletReady, &MoveDir, &Radius)>,
     mut rip: ResMut<RollbackIdProvider>,
 ) {
-    let bullet_radius = 5.fix() / 100;
-    let bullet_width = (bullet_radius * 2).to_num();
+    const BULLET_WIDTH_RF: f32 = (BULLET_RADIUS_SI * 2) as f32 * I2F;
     for (player_transform, player, mut bullet_ready, player_move_dir, player_radius) in
         player_query.iter_mut()
     {
         let (input, _) = inputs[player.handle];
         if fire(input) && bullet_ready.0 {
-            let pos = player_transform.0 + player_move_dir.0 * (bullet_radius + player_radius.0);
+            let pos = player_transform.0
+                + (player_move_dir.0 * (BULLET_RADIUS_SI + player_radius.0)) / DIRECTION_SCALE;
             commands.spawn((
                 Bullet,
                 *player_move_dir,
                 SpriteBundle {
-                    transform: Transform::from_translation(Vec2::from(pos).extend(200.))
-                        .with_rotation(Quat::from_rotation_arc_2d(
-                            Vec2::X,
-                            Vec2::from(player_move_dir.0),
-                        )),
+                    transform: Transform::from_translation(pos.i2f().extend(200.)).with_rotation(
+                        Quat::from_rotation_arc_2d(Vec2::X, player_move_dir.0.i2f().normalize()),
+                    ),
                     texture: images.bullet.clone(),
                     sprite: Sprite {
-                        custom_size: Some(Vec2::new(bullet_width * 3., bullet_width)),
+                        custom_size: Some(Vec2::new(BULLET_WIDTH_RF * 3., BULLET_WIDTH_RF)),
                         ..default()
                     },
                     ..default()
                 },
                 Rollback::new(rip.next_id()),
                 Position(pos),
-                Radius(bullet_radius),
+                Radius(BULLET_RADIUS_SI),
             ));
             bullet_ready.0 = false;
         }
@@ -435,8 +473,9 @@ fn fire_bullets(
 }
 
 fn move_bullet(mut query: Query<(&mut Position, &MoveDir), With<Bullet>>) {
-    for (mut transform, dir) in query.iter_mut() {
-        transform.0 += dir.0 * Fixed::from_num(0.35);
+    const BULLET_SPEED_SI: i32 = (35 * F2I) / 100;
+    for (mut position, dir) in query.iter_mut() {
+        position.0 += (dir.0 * BULLET_SPEED_SI) / DIRECTION_SCALE;
     }
 }
 
@@ -462,9 +501,10 @@ fn kill_players(
 ) {
     for (player, player_transform, player_radius) in player_query.iter() {
         for (bullet_transform, bullet_radius) in bullet_query.iter() {
-            let distance = (player_transform.0 - bullet_transform.0).norm();
-            if distance < player_radius.0 + bullet_radius.0 {
-                commands.entity(player).remove::<SpriteBundle>();
+            if let Some(distance) = (player_transform.0 - bullet_transform.0).norm() {
+                if distance < player_radius.0 + bullet_radius.0 {
+                    commands.entity(player).remove::<SpriteBundle>();
+                }
             }
         }
     }
